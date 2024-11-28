@@ -12,20 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from verl.utils.import_utils import is_vllm_available, is_megatron_core_available
-
-AllGatherPPModel = None
-
-if is_megatron_core_available() and is_vllm_available():
-    from .megatron_vllm import AllGatherPPModel, MegatronVLLMShardingManager
-elif AllGatherPPModel is not None:
-    pass
-else:
-    AllGatherPPModel = None
-    MegatronVLLMShardingManager = None
-
-if is_vllm_available():
-    from .fsdp_vllm import FSDPVLLMShardingManager
-    from .fsdp_vllm_sc import FSDPVLLMscShardingManager
-else:
-    FSDPVLLMShardingManager = None
+from .vllm_sc_rollout import vLLMscRollout

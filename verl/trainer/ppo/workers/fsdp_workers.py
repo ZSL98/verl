@@ -239,6 +239,20 @@ class ActorRolloutRefWorker(Worker):
                                                        model_config=self.actor_model_config,
                                                        full_params='hf' in self.config.rollout.load_format)
             log_gpu_memory_usage('After building sharding manager', logger=None)
+        elif self.config.rollout.name == 'vllm_sc': # ZSL: refers to VLLM single controller
+            from verl.trainer.ppo.rollout.vllm_sc_rollout import vLLMscRollout
+            from verl.trainer.ppo.hybrid_engine import FSDPVLLMscShardingManager
+            log_gpu_memory_usage('Before building vllm_sc rollout', logger=None)
+            rollout = vLLMscRollout(actor_module=self.actor_module_fsdp,
+                                  config=self.config.rollout,
+                                  tokenizer=self.tokenizer,
+                                  model_hf_config=self.actor_model_config)
+            log_gpu_memory_usage('After building vllm_sc rollout', logger=None)
+            sharding_manager = FSDPVLLMscShardingManager(module=self.actor_module_fsdp,
+                                                       inference_engine=rollout.inference_engine,
+                                                       model_config=self.actor_model_config,
+                                                       full_params='hf' in self.config.rollout.load_format)
+            log_gpu_memory_usage('After building sharding manager', logger=None)
 
         return rollout, sharding_manager
 
