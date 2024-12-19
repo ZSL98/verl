@@ -67,13 +67,15 @@ class RayResourcePool(ResourcePool):
 
         pg_name_prefix = name if name else \
             f"{self.name_prefix}verl_group_{'_'.join([str(count) for count in self._store])}:"
-        # print(f"pg_name_prefix = {pg_name_prefix}")
+        print(f"pg_name_prefix = {pg_name_prefix}")
         pg_scheme = [[{
             "CPU": self.max_collocate_count,
             "GPU": 1
         } if self.use_gpu else {
             "CPU": self.max_collocate_count
         } for _ in range(process_count)] for process_count in self._store]
+
+        print("pg_scheme:", pg_scheme)
 
         lifetime = 'detached' if self.detached else None
 
@@ -83,6 +85,10 @@ class RayResourcePool(ResourcePool):
         ]
 
         ray.get([pg.ready() for pg in pgs])
+
+        print("pgs size: ", len(pgs))
+        print("PlacementGroup ID:", pgs[0].id)
+        print("PlacementGroup Bundle Resources:", pgs[0].bundle_specs)
 
         self.pgs = pgs
         return pgs
@@ -167,9 +173,9 @@ class RayClassWithInitArgs(ClassWithInitArgs):
             for k, v in self._additional_resource.items():
                 options[k] = v
 
-        # print("cls:", self.cls)
-        # print("args: ", self.args)
-        # print("kwargs: ", self.kwargs)
+        print("cls:", self.cls)
+        print("args: ", self.args)
+        print("kwargs: ", self.kwargs)
         return self.cls.options(**options).remote(*self.args, **self.kwargs)
 
 
@@ -335,7 +341,7 @@ class RayWorkerGroup(WorkerGroup):
     def execute_all_async(self, method_name: str, *args, **kwargs):
         # 这里我们假设，如果 args 和 kwargs 里面所有的参数都是 list，且所有的 list 长度都与 len(self._workers) 一致的话，我们会把
         # list 中的每一个分别发到对应的 worker 上去
-        # print(f"execute_all_async: method {method_name}({args}, {kwargs})")
+        print(f"execute_all_async: method {method_name}({args}, {kwargs})")
         length = len(self._workers)
         if all(isinstance(arg, list) for arg in args) and all(isinstance(kwarg, list) for kwarg in kwargs.values()):
             if all(len(arg) == length for arg in args) and all(len(kwarg) == length for kwarg in kwargs.values()):

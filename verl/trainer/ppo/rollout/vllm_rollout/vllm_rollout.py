@@ -35,8 +35,8 @@ from torch import nn
 from verl import DataProto
 from verl.utils.torch_functional import get_eos_mask, pad_sequence_to_length
 from verl.trainer.ppo.rollout.base import BaseRollout
-from verl.third_party.vllm import LLM, vllm_version
-from verl.third_party.vllm import parallel_state as vllm_ps
+from vllm import LLM
+from vllm.engine.llm_engine import LLMEngine
 from vllm import SamplingParams
 
 # TODO
@@ -56,7 +56,12 @@ def _pre_process_inputs(pad_token_id, prompt_token_ids: torch.Tensor) -> List[in
 
 class vLLMRollout(BaseRollout):
 
-    def __init__(self, actor_module: nn.Module, config: DictConfig, tokenizer, model_hf_config, **kwargs):
+    def __init__(self, 
+                 actor_module: nn.Module, 
+                 engine: LLMEngine,
+                 config: DictConfig, 
+                 tokenizer, 
+                 **kwargs):
         """A vLLM rollout. It requires the module is supported by the vllm.
 
         Args:
@@ -80,15 +85,10 @@ class vLLMRollout(BaseRollout):
             os.environ['MEGATRON_IMPORT_TIMERS'] = '0'
             train_tp = kwargs.get('train_tp', None)
             num_tp_per_train_tp = train_tp // tensor_parallel_size
-            if vllm_version == '0.4.2' or vllm_version == '0.5.4':
-                vllm_ps.initialize_parallel_state(tensor_model_parallel_size=tensor_parallel_size,
-                                                  num_tp_per_train_tp=num_tp_per_train_tp)
 
-        assert model_hf_config.max_position_embeddings >= config.prompt_length + config.response_length, \
-            "model context length should be greater than total sequence length"
-        self.inference_engine = LLM(actor_module,
-                                    tokenizer=tokenizer,
-                                    model_hf_config=model_hf_config,
+        # assert model_hf_config.max_position_embeddings >= config.prompt_length + config.response_length, \
+        #     "model context length should be greater than total sequence length"
+        self.inference_engine_remote = LLM(model="deepseek-ai/deepseek-llm-7b-chat",
                                     tensor_parallel_size=tensor_parallel_size,
                                     dtype=config.dtype,
                                     enforce_eager=config.enforce_eager,
@@ -98,17 +98,13 @@ class vLLMRollout(BaseRollout):
                                     load_format=config.load_format)
 
         # Offload vllm model to reduce peak memory usage
-        self.inference_engine.offload_model_weights()
+        self.inference_engine_remote.offload_model_weights()
 
         kwargs = dict(
             n=1,
             logprobs=1,  # can be set to 0 and let actor to recompute
             max_tokens=config.response_length,
         )
-
-        # we may detokenize the result all together later
-        if vllm_version == '0.4.2' or vllm_version == '0.5.4':
-            kwargs['detokenize'] = False
 
         # supporting adding any sampling params from the config file
         for k in config.keys():

@@ -66,6 +66,8 @@ class ActorRolloutRefWorker(MegatronWorker):
     or a hybrid engine based on the config.rollout
     """
 
+    # NOTE(ZSL): We need a coordination actor to pick a worker as the driver worker 
+    # to initialize a vLLM instance. Maybe there are easier ways to achieve so.
     def __init__(self, config: DictConfig, role: str):
         super().__init__()
         self.config = config
@@ -228,6 +230,8 @@ class ActorRolloutRefWorker(MegatronWorker):
                     self.config.rollout.layer_name_map.get("gate_proj_layer_name", "linear_fc1.weight"),
             }
 
+            print("_build_rollout")
+
             # reshard the weight partition from actor to rollout to initialize the rollout class
             # create a new cuda space for parameters not in this pp rank
             self.hybrid_engine.load_params_to_cuda()
@@ -239,23 +243,29 @@ class ActorRolloutRefWorker(MegatronWorker):
             params = normalize_pp_vpp_params(params=params,
                                              num_hidden_layers=self.actor_model_config.num_hidden_layers,
                                              layer_name='layers')
-            rollout = vLLMRollout(actor_module=params,
+            print("_build_rollout-1")
+            # Note(ZSL): We have an LLMEngine on each device, but we only need one!
+
+            rollout_actor = ray.get_actor("LLMRemote")
+            rollout_engine = ray.get(rollout_actor.initialize_vllm.remote(self.config.rollout))
+            rollout_worker = vLLMRollout(actor_module=params,
+                                  engine=rollout_engine,
                                   config=self.config.rollout,
                                   tokenizer=self.tokenizer,
-                                  model_hf_config=self.actor_model_config,
                                   train_tp=mpu.get_tensor_model_parallel_world_size())
+            print("_build_rollout-2")
             log_gpu_memory_usage('After building vllm rollout', logger=logger)
 
             # perform weight resharding between actor and rollout
             sharding_manager = MegatronVLLMShardingManager(module=self.hybrid_engine,
-                                                           inference_engine=rollout.inference_engine,
+                                                           inference_engine=rollout_engine,
                                                            model_config=self.actor_model_config,
                                                            layer_name_mapping=layer_name_mapping)
             log_gpu_memory_usage('After building sharding manager', logger=logger)
         else:
             NotImplementedError('Only vllmRollout is supported with Megatron now')
 
-        return rollout, sharding_manager
+        return rollout_worker, sharding_manager
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
@@ -343,6 +353,7 @@ class ActorRolloutRefWorker(MegatronWorker):
 
     @register(dispatch_mode=Dispatch.MEGATRON_PP_AS_DP_PROTO)
     def generate_sequences(self, prompts: DataProto):
+        print("We are ready to generate sequences-1")
         assert self._is_rollout
 
         prompts.batch = prompts.batch.cuda()
@@ -352,6 +363,7 @@ class ActorRolloutRefWorker(MegatronWorker):
             log_gpu_memory_usage('After entering sharding manager', logger=logger)
 
             prompts = self.sharding_manager.preprocess_data(prompts)
+            print("We are ready to generate sequences.")
             output = self.rollout.generate_sequences(prompts=prompts)
 
             log_gpu_memory_usage('After rollout generation', logger=logger)

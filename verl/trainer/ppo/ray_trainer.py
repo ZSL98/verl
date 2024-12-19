@@ -32,6 +32,9 @@ from single_controller.ray.base import create_colocated_worker_cls
 from verl import DataProto
 from verl.trainer.ppo import core_algos
 
+import ray
+import time
+
 WorkerType = Type[Worker]
 
 
@@ -393,6 +396,8 @@ class RayPPOTrainer(object):
             self.rm_wg.init_model()
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
+        from verl.third_party.vllm import LLMRemote
+        self.rollout_driver = LLMRemote.options(name="LLMRemote").remote()
         self.actor_rollout_wg = all_wg['actor_rollout']
         self.actor_rollout_wg.init_model()
 

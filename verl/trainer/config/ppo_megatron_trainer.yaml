@@ -33,7 +33,7 @@ actor_rollout_ref:
       warmup_style: constant  # select from constant/cosine
       total_training_steps: -1  # must be override by program
     megatron:
-      tensor_model_parallel_size: 4
+      tensor_model_parallel_size: 8
       pipeline_model_parallel_size: 1
       num_layers_per_virtual_pipeline_stage: null # vpp will hang. need debug.
       sequence_parallel: True
@@ -41,7 +41,7 @@ actor_rollout_ref:
     load_weight: True
   ref:
     megatron:
-      tensor_model_parallel_size: 4
+      tensor_model_parallel_size: 8
       pipeline_model_parallel_size: 1
       num_layers_per_virtual_pipeline_stage: null # vpp will hang. need debug.
       sequence_parallel: True
@@ -62,7 +62,7 @@ actor_rollout_ref:
     ignore_eos: False
     enforce_eager: True
     free_cache_engine: True
-    load_format: dummy_megatron
+    load_format: dummy
     tensor_model_parallel_size: 2
     max_num_batched_tokens: 8192
     max_num_seqs: 1024
@@ -89,7 +89,7 @@ critic:
     external_lib: ${actor_rollout_ref.model.external_lib}
     enable_gradient_checkpointing: False
   megatron:
-    tensor_model_parallel_size: 4
+    tensor_model_parallel_size: 8
     pipeline_model_parallel_size: 1
     num_layers_per_virtual_pipeline_stage: null # vpp will hang. need debug.
     sequence_parallel: True
@@ -108,7 +108,7 @@ reward_model:
   enable: False
   strategy: megatron
   megatron:
-    tensor_model_parallel_size: 4
+    tensor_model_parallel_size: 8
     pipeline_model_parallel_size: 1
     num_layers_per_virtual_pipeline_stage: null # vpp will hang. need debug.
     sequence_parallel: True

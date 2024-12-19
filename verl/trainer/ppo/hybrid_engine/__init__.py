@@ -26,6 +26,5 @@ else:
 
 if is_vllm_available():
     from .fsdp_vllm import FSDPVLLMShardingManager
-    from .fsdp_vllm_sc import FSDPVLLMscShardingManager
 else:
     FSDPVLLMShardingManager = None
