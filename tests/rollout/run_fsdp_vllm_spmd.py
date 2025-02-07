@@ -34,7 +34,10 @@ def main():
 
     local_cache_path = '~/.cache/verl/rlhf'
     local_cache_path = os.path.expanduser(local_cache_path)
-    hdfs_path = 'Qwen/Qwen2-7B-Instruct'
+    hdfs_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/models/gemma-7b'
+    # Meta-Llama-3-8B-Instruct
+    # deepseek-llm-7b-chat
+    # gemma-7b
 
     from verl.utils.fs import copy_local_path_from_hdfs
     local_model_path = copy_local_path_from_hdfs(src=hdfs_path, cache_dir=local_cache_path)
@@ -120,10 +123,10 @@ def main():
     for key, value in state_dict.items():
         empty_state_dict[key] = torch.zeros_like(value)
 
-    llm.sleep(level=2)
-    llm.wake_up()
-    load_dtensor_weights(empty_state_dict, llm.llm_engine.model_executor.driver_worker.worker.model_runner.model)
-    load_dtensor_weights(state_dict, llm.llm_engine.model_executor.driver_worker.worker.model_runner.model)
+    # llm.sleep(level=2)
+    # llm.wake_up()
+    # load_dtensor_weights(empty_state_dict, llm.llm_engine.model_executor.driver_worker.worker.model_runner.model)
+    # load_dtensor_weights(state_dict, llm.llm_engine.model_executor.driver_worker.worker.model_runner.model)
 
     outputs = llm.generate(preencode_prompts, sampling_params)
     cpu_group = get_world_group().cpu_group

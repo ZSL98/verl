@@ -20,6 +20,7 @@ import torch.distributed as dist
 
 from torch import nn
 
+from verl.third_party.vllm import vllm_version
 from megatron.core import parallel_state as mpu
 from megatron.core import DistributedDataParallel as LocalDDP
 from megatron.core.transformer.module import Float16Module
@@ -227,8 +228,8 @@ from torch.distributed import new_group
 from verl import DataProto
 from verl.utils.torch_functional import (broadcast_dict_tensor, allgather_dict_tensors)
 import verl.utils.megatron.tensor_parallel as tp_utils
+from vllm import LLM
 from verl.third_party.vllm import parallel_state as vllm_ps
-from verl.third_party.vllm import LLM
 from verl.utils.model import normalize_pp_vpp_params
 # Micro Data parallel group. Micro data parallel group is additional dp group that origins from splitting training tp
 # into infer_tp and micro_tp. By default, we use order micro_dp - tp
@@ -355,7 +356,13 @@ class MegatronVLLMShardingManager(BaseShardingManager):
                                               num_hidden_layers=self.model_config.num_hidden_layers,
                                               layer_name='layers')
         self.origin_params = self._post_process_params(self.params)
-        self.inference_engine.sync_model_weights(self.params, load_format='megatron')
+        if vllm_version in ('0.4.2', '0.5.4', '0.6.3'):
+            self.inference_engine.sync_model_weights(params, load_format='megatron')
+        else:
+            self.inference_engine.wake_up()
+            # TODO(ZSL): deal with 'hf' format
+            from verl.third_party.vllm import load_megatron_weights
+            load_megatron_weights(params, self.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model)
 
     def __exit__(self, exc_type, exc_value, traceback):
         # offload parameters doesn't belong to this pp rank
@@ -368,7 +375,10 @@ class MegatronVLLMShardingManager(BaseShardingManager):
                 self.params[name] = self.origin_params[name]
 
         # self.inference_engine.sync_model_weights(params)
-        self.inference_engine.offload_model_weights()
+        if vllm_version in ('0.4.2', '0.5.4', '0.6.3'):
+            self.inference_engine.offload_model_weights()
+        else:
+            self.inference_engine.sleep(level=1)
 
         self.module.train()
 
