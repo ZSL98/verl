@@ -38,6 +38,7 @@ def main():
     # Meta-Llama-3-8B-Instruct
     # deepseek-llm-7b-chat
     # gemma-7b
+    # FsfairX-LLaMA3-RM-v0.1
 
     from verl.utils.fs import copy_local_path_from_hdfs
     local_model_path = copy_local_path_from_hdfs(src=hdfs_path, cache_dir=local_cache_path)

@@ -357,12 +357,12 @@ class MegatronVLLMShardingManager(BaseShardingManager):
                                               layer_name='layers')
         self.origin_params = self._post_process_params(self.params)
         if vllm_version in ('0.4.2', '0.5.4', '0.6.3'):
-            self.inference_engine.sync_model_weights(params, load_format='megatron')
+            self.inference_engine.sync_model_weights(self.params, load_format='megatron')
         else:
             self.inference_engine.wake_up()
             # TODO(ZSL): deal with 'hf' format
             from verl.third_party.vllm import load_megatron_weights
-            load_megatron_weights(params, self.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model)
+            load_megatron_weights(self.params, self.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model)
 
     def __exit__(self, exc_type, exc_value, traceback):
         # offload parameters doesn't belong to this pp rank
