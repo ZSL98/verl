@@ -23,7 +23,7 @@ from vllm.model_executor.models import ModelRegistry
 
 
 # NOTE(shengguangming): replace the origin weight loader function in the class
-def parallel_weight_loader(self, param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+def parallel_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
     """Parallel Linear weight loader."""
     assert (param.size() == loaded_weight.size(
     )), "the parameter size is not align with the loaded weight size, param size: {}, loaded_weight size: {}".format(
@@ -73,6 +73,7 @@ def gpt2_weight_loader(actor_weights: Dict, vllm_model: nn.Module) -> nn.Module:
 
 def llama_megatron_weight_loader(actor_weights: Dict, vllm_model: nn.Module) -> nn.Module:
     # NOTE(shengguangming): the megatron llama may have this prefix
+    print("Use this llama_megatron_weight_loader")
     params_dict = dict(vllm_model.named_parameters())
     for name, loaded_weight in actor_weights.items():
         if "rotary_emb.inv_freq" in name:
@@ -80,6 +81,9 @@ def llama_megatron_weight_loader(actor_weights: Dict, vllm_model: nn.Module) -> 
         else:
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            # print(name, weight_loader)
+            if "embed_tokens" in name or "lm_head" in name or 'qkv' in name or 'proj' in name:
+                weight_loader = parallel_weight_loader
             weight_loader(param, loaded_weight)
 
 
