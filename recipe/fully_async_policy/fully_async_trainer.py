@@ -352,9 +352,26 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
         with marked_timer("timing_s/wait_last_valid", timing_param_sync):
             ray.get(self.param_synchronizer.wait_last_valid.remote())
         with marked_timer("timing_s/param_sync", timing_param_sync):
-            ray.get(
-                self.param_synchronizer.sync_weights.remote(
-                    self.current_param_version, validate=validate, global_steps=global_steps
+            if self.config.trainer.save_freq == 1:
+                """If save_freq == 1, update from disk using ckpt engine every global step"""
+                print("[Sync Weight] Sync weight through kimi ckpt engine")
+                ray.get(
+                    self.param_synchronizer.update_weights_with_ckpt_engine.remote(
+                        self.current_param_version, validate=validate, global_steps=global_steps
+                    )
                 )
-            )
+            elif self.config.trainer.save_method == "rank0":
+                print("[Sync Weight] Sync weight through actor rank0")
+                ray.get(
+                    self.param_synchronizer.sync_weights_through_rank0.remote(
+                        self.current_param_version, validate=validate, global_steps=global_steps
+                    )
+                )
+            else:
+                """Otherwise, sync_weights between trainer and rollouter"""
+                ray.get(
+                    self.param_synchronizer.sync_weights.remote(
+                        self.current_param_version, validate=validate, global_steps=global_steps
+                    )
+                )
         self.logger.log(data=timing_param_sync, step=self.current_param_version)

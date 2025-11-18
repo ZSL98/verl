@@ -48,7 +48,7 @@ class ParameterSynchronizer:
         self.current_version = 0
 
         self._init_weights_info()
-        self._init_sync_group()
+        # self._init_sync_group()
 
     def get_current_param_version(self) -> int:
         """Get current parameter version number"""
@@ -69,7 +69,7 @@ class ParameterSynchronizer:
             actor_rollout_workers,
             len(actor_rollout_workers),
             list(range(0, len(actor_rollout_workers))),
-            backend="nccl",
+            backend="hccl",
             group_name=self.sync_group_name,
         )
 
@@ -88,6 +88,60 @@ class ParameterSynchronizer:
         # sync weights
         self.actor_wg.sync_rollout_weights()
         ray.get(self.rollout_wg.sync_rollout_weights())
+        end_time = time.time()
+        print(f"[ParameterSynchronizer] sync_weights success. cost {end_time - start_time:.2f} seconds")
+
+        # Async Update rollout version & validation
+        self.wait_last_update = self.rollouter.update_param_version.remote(version, validate, global_steps)
+        self.wait_last_resume = self.rollouter.resume.remote(self.wait_last_update)
+
+    def sync_weights_through_rank0(self, version, validate=False, global_steps=0):
+        start_time = time.time()
+
+        self.current_version = version
+        print(f"[ParameterSynchronizer] Starting weight updating (version {self.current_version})...")
+        ray.get(self.rollouter.pause.remote())
+
+        # Update MQ version
+        self.mq_client.update_param_version_sync(version)
+
+        # actor_rank0 = self.actor_wg
+        # print(self.actor_wg.workers)
+
+        # weights_ref_dict_future = self.actor_wg.workers[0].prepare_rollout_weights.remote()
+        # weights_ref_dict = ray.get(weights_ref_dict_future)
+
+        # rollout_futures = [
+        #     worker.load_rollout_weights.remote(weights_ref_dict)
+        #     for worker in self.rollout_wg.workers
+        # ]
+        # ray.get(rollout_futures)
+
+        weights_ref_dict = self.actor_wg.prepare_rollout_weights()
+        self.rollout_wg.load_rollout_weights(weights_ref_dict[0])
+
+        end_time = time.time()
+        print(f"[ParameterSynchronizer] sync_weights success. cost {end_time - start_time:.2f} seconds")
+
+        # Async Update rollout version & validation
+        self.wait_last_update = self.rollouter.update_param_version.remote(version, validate, global_steps)
+        self.wait_last_resume = self.rollouter.resume.remote(self.wait_last_update)
+
+    def update_weights_with_ckpt_engine(self, version, validate=False, global_steps=0):
+        """Update weights of rollouter, using ckpt engine"""
+        start_time = time.time()
+
+        self.current_version = version
+        print(f"[ParameterSynchronizer] Starting weight updating (version {self.current_version})...")
+
+        ray.get(self.rollouter.pause.remote())
+
+        # Update MQ version
+        self.mq_client.update_param_version_sync(version)
+
+        # ray.get(self.rollout_wg.load_weight())
+        # ray.get(self.rollouter.)
+    
         end_time = time.time()
         print(f"[ParameterSynchronizer] sync_weights success. cost {end_time - start_time:.2f} seconds")
 

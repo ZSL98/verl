@@ -106,6 +106,23 @@ class DetachActorWorker(DetachNcclSync):
         return params
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def prepare_rollout_weights(self):
+        assert self._is_actor and not self.config.hybrid_engine
+        assert hasattr(self, "_weights_info") and self._weights_info is not None
+
+        params = self._get_actor_params()
+        weights_ref_dict = {}
+
+        for key, shape, dtype in self._weights_info:
+            origin_data = params[key]
+            if hasattr(origin_data, "full_tensor"):
+                origin_data = origin_data.full_tensor()
+            if torch.distributed.get_rank() == 0:
+                cpu_tensor = origin_data.detach().cpu()
+                weights_ref_dict[key] = cpu_tensor
+        return weights_ref_dict
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def get_actor_weights_info(self):
         assert self._is_actor
         if hasattr(self, "_weights_info"):
@@ -147,6 +164,23 @@ class DetachAsyncRolloutWorker(DetachNcclSync):
     def __init__(self, config: DictConfig, role: str):
         print(f"[DetachAsyncRolloutWorker] {DetachAsyncRolloutWorker.__mro__}")
         ActorRolloutRefWorker.__init__(self, config, role)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def load_rollout_weights(self, weights_ref_dict):
+        assert self._is_rollout and not self.config.hybrid_engine
+        assert hasattr(self, "_weights_info") and self._weights_info is not None
+
+        inference_model = get_inference_model(self.rollout)
+        from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
+        patch_vllm_moe_model_weight_loader(inference_model)
+
+        for key, shape, dtype in self._weights_info:
+            cpu_tensor = weights_ref_dict[key]
+            gpu_tensor = cpu_tensor.to(get_torch_device().current_device(), non_blocking=True)
+            inference_model.load_weights([(key, gpu_tensor)])
+            del cpu_tensor
+
+        get_torch_device().empty_cache()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def set_actor_weights_info(self, weights_info):

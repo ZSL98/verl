@@ -2,7 +2,7 @@
 set -xeuo pipefail
 
 project_name='DAPO'
-exp_name='DAPO-Qwen2.5-7b-MATH-0527a1-fsdp2-fully-async-4-4'
+exp_name='DAPO-Qwen3-0.6b-MATH-fsdp2-fully-async-on-policy-4-4'
 
 # Ray
 # RAY_ADDRESS=${RAY_ADDRESS:-"http://localhost:8265"}
@@ -71,11 +71,11 @@ gen_prompt_bsz=1
 n_resp_per_prompt=16
 train_prompt_mini_bsz=32
 total_rollout_steps=$(((512*100)))
-test_freq=10
-staleness_threshold=0.1
-trigger_parameter_sync_step=4
+test_freq=5
+staleness_threshold=0
+trigger_parameter_sync_step=1
 require_batches=4
-partial_rollout=True
+partial_rollout=False
 
 python -m recipe.fully_async_policy.fully_async_main \
     data.train_files="${TRAIN_FILE}" \
@@ -146,7 +146,8 @@ python -m recipe.fully_async_policy.fully_async_main \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
     trainer.val_before_train=False \
-    trainer.save_freq=-1 \
+    trainer.save_freq=5 \
+    +trainer.save_method="rank0" \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
     trainer.nnodes="${NNODES}" \
@@ -160,4 +161,5 @@ python -m recipe.fully_async_policy.fully_async_main \
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}" \
     async_training.require_batches="${require_batches}" \
     async_training.partial_rollout="${partial_rollout}" \
-    async_training.use_rollout_log_probs=True
+    async_training.use_rollout_log_probs=True \
+    trainer.device=npu $@
