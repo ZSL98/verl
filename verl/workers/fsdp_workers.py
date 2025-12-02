@@ -464,7 +464,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             reduce_dtype = PrecisionType.to_dtype(mixed_precision_config.get("reduce_dtype", "fp32"))
             buffer_dtype = PrecisionType.to_dtype(mixed_precision_config.get("buffer_dtype", "fp32"))
         else:
-            param_dtype = torch.bfloat16
+            param_dtype = PrecisionType.to_dtype(fsdp_config.dtype)
             reduce_dtype = torch.float32
             buffer_dtype = torch.float32
 
@@ -476,9 +476,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             is_lora=self._is_lora,
         )
 
-        if self._is_rollout and self.config.rollout.name == "hf":
-            # TODO(zhangchi.usc1992, shengguangming) fix me. Current, auto_wrap_policy causes HFRollout to hang in Gemma
-            auto_wrap_policy = None
+        # if self._is_rollout and self.config.rollout.name == "hf":
+        #     # TODO(zhangchi.usc1992, shengguangming) fix me.
+        #     Current, auto_wrap_policy causes HFRollout to hang in Gemma
+        #     auto_wrap_policy = None
 
         if self.rank == 0:
             print(f"wrap_policy: {auto_wrap_policy}")

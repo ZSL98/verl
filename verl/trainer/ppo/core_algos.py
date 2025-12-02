@@ -41,7 +41,7 @@ PolicyLossFn = Callable[
         torch.Tensor,  # advantages
         torch.Tensor,  # response_mask
         str,  # loss_agg_mode
-        Optional[DictConfig | AlgoConfig],  # config
+        Optional[DictConfig | ActorConfig],  # config
         torch.Tensor | None,  # rollout_log_probs
     ],
     tuple[torch.Tensor, dict[str, Any]],
@@ -769,39 +769,58 @@ def compute_rewards(token_level_scores, old_log_prob, ref_log_prob, kl_ratio):
     return token_level_scores - kl * kl_ratio
 
 
-def agg_loss(loss_mat: torch.Tensor, loss_mask: torch.Tensor, loss_agg_mode: str):
+def agg_loss(
+    loss_mat: torch.Tensor,
+    loss_mask: torch.Tensor,
+    loss_agg_mode: str,
+    dp_size: int = 1,
+    batch_num_tokens: Optional[int] = None,
+    global_batch_size: Optional[int] = None,
+    loss_scale_factor: Optional[int] = None,
+):
     """
-    Aggregate the loss matrix into a scalar.
+    Aggregate the loss across global batch to ensure the loss is invariant to fsdp/megatron parallelism.
+
+    NOTE: The returned loss has different behaviors for different backend:
+    - FSDP: the loss is directly used for backward.
+    - Megatron: the loss should be scaled by `num_microbatches` and `cp_size` for pp schedule.
 
     Args:
-        loss_mat: `(torch.Tensor)`:
-            shape: (bs, response_length)
-        loss_mask: `(torch.Tensor)`:
-            shape: (bs, response_length)
-        loss_agg_mode: (str) choices:
-            method to aggregate the loss matrix into a scalar.
+        loss_mat: micro batch loss matrix, (bs, response_length)
+        loss_mask: micro batch loss mask, (bs, response_length)
+        loss_agg_mode: method to aggregate the loss matrix into a scalar
+        dp_size: data parallel size
+        batch_num_tokens: number of valid tokens in global batch
+        global_batch_size: global batch size
+        loss_scale_factor: scale factor for "seq-mean-token-sum-norm" mode. If None, uses loss_mask.shape[-1].
+            Set this to a constant value to ensure consistent normalization throughout training.
+
     Returns:
         loss: `a scalar torch.Tensor`
             aggregated loss
     """
     if loss_agg_mode == "token-mean":
-        loss = verl_F.masked_mean(loss_mat, loss_mask)
+        if batch_num_tokens is None:
+            batch_num_tokens = loss_mask.sum()
+        loss = verl_F.masked_sum(loss_mat, loss_mask) / batch_num_tokens * dp_size
     elif loss_agg_mode == "seq-mean-token-sum":
         seq_losses = torch.sum(loss_mat * loss_mask, dim=-1)  # token-sum
         seq_mask = (torch.sum(loss_mask, dim=-1) > 0).float()  # exclude fully masked sequences
-        loss = verl_F.masked_mean(seq_losses, seq_mask)  # seq-mean
+        if global_batch_size is None:
+            global_batch_size = seq_mask.sum()
+        loss = verl_F.masked_sum(seq_losses, seq_mask) / global_batch_size * dp_size  # seq-mean
     elif loss_agg_mode == "seq-mean-token-mean":
         seq_mask = torch.sum(loss_mask, dim=-1)  # per-sequence token count
         seq_losses = torch.sum(loss_mat * loss_mask, dim=-1) / (seq_mask + 1e-8)  # token-mean
         seq_mask = (seq_mask > 0).float()  # exclude fully masked sequences
-        loss = verl_F.masked_mean(seq_losses, seq_mask)  # seq-mean
+        if global_batch_size is None:
+            global_batch_size = seq_mask.sum()
+        loss = verl_F.masked_sum(seq_losses, seq_mask) / global_batch_size * dp_size  # seq-mean
     elif loss_agg_mode == "seq-mean-token-sum-norm":
         seq_losses = torch.sum(loss_mat * loss_mask, dim=-1)
-        loss = torch.sum(seq_losses) / loss_mask.shape[-1]  # The divisor
-        # (loss_mask.shape[-1]) should ideally be constant
-        # throughout training to well-replicate the DrGRPO paper.
-        # TODO: Perhaps add user-defined normalizer argument to
-        # agg_loss to ensure divisor stays constant throughout.
+        if loss_scale_factor is None:
+            loss_scale_factor = loss_mask.shape[-1]
+        loss = torch.sum(seq_losses) / loss_scale_factor
     else:
         raise ValueError(f"Invalid loss_agg_mode: {loss_agg_mode}")
 
@@ -891,7 +910,7 @@ def compute_policy_loss_vanilla(
     advantages: torch.Tensor,
     response_mask: torch.Tensor,
     loss_agg_mode: str = "token-mean",
-    config: Optional[DictConfig | AlgoConfig] = None,
+    config: Optional[ActorConfig] = None,
     rollout_is_weights: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """
@@ -966,7 +985,9 @@ def compute_policy_loss_vanilla(
     if rollout_is_weights is not None:
         pg_losses = pg_losses * rollout_is_weights
 
-    pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+    pg_loss = agg_loss(
+        loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
+    )
 
     pg_metrics = {
         "actor/pg_clipfrac": pg_clipfrac.detach().item(),
@@ -983,7 +1004,7 @@ def compute_policy_loss_gspo(
     advantages: torch.Tensor,
     response_mask: torch.Tensor,
     loss_agg_mode: str = "seq-mean-token-mean",
-    config: Optional[DictConfig | ActorConfig] = None,
+    config: Optional[ActorConfig] = None,
     rollout_is_weights: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """
@@ -1035,7 +1056,9 @@ def compute_policy_loss_gspo(
         pg_losses = pg_losses * rollout_is_weights
 
     # for GSPO, we need to aggregate the loss at the sequence level (seq-mean-token-mean)
-    pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode="seq-mean-token-mean")
+    pg_loss = agg_loss(
+        loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode="seq-mean-token-mean", **config.global_batch_info
+    )
 
     # For compatibility, return zero for pg_clipfrac_lower (not used in standard GSPO)
     pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
@@ -1057,7 +1080,7 @@ def compute_policy_loss_gpg(
     advantages: torch.Tensor,
     response_mask: torch.Tensor,
     loss_agg_mode: str = "token-mean",
-    config: Optional[DictConfig | AlgoConfig] = None,
+    config: Optional[ActorConfig] = None,
     rollout_is_weights: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Adapted from
@@ -1073,13 +1096,16 @@ def compute_policy_loss_gpg(
         pg_loss: `a scalar torch.Tensor`
             policy gradient loss computed via GPG
     """
+    assert config is not None
     pg_losses = -log_prob * advantages
 
     # Apply rollout correction weights if provided
     if rollout_is_weights is not None:
         pg_losses = pg_losses * rollout_is_weights
 
-    pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+    pg_loss = agg_loss(
+        loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
+    )
     return pg_loss, {}
 
 
@@ -1090,7 +1116,7 @@ def compute_policy_loss_clip_cov(
     advantages: torch.Tensor,
     response_mask: torch.Tensor,
     loss_agg_mode: str = "token-mean",
-    config: Optional[DictConfig | AlgoConfig] = None,
+    config: Optional[ActorConfig] = None,
     rollout_is_weights: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """
@@ -1178,7 +1204,9 @@ def compute_policy_loss_clip_cov(
     if rollout_is_weights is not None:
         pg_losses = pg_losses * rollout_is_weights
 
-    pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+    pg_loss = agg_loss(
+        loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
+    )
     pg_metrics = {
         "actor/pg_clipfrac": pg_clipfrac.detach().item(),
         "actor/ppo_kl": ppo_kl.detach().item(),
@@ -1193,7 +1221,7 @@ def compute_policy_loss_kl_cov(
     advantages: torch.Tensor,
     response_mask: torch.Tensor,
     loss_agg_mode: str = "token-mean",
-    config: Optional[DictConfig | AlgoConfig] = None,
+    config: Optional[ActorConfig] = None,
     rollout_is_weights: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """
@@ -1257,7 +1285,9 @@ def compute_policy_loss_kl_cov(
     if rollout_is_weights is not None:
         pg_losses = pg_losses * rollout_is_weights
 
-    pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+    pg_loss = agg_loss(
+        loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
+    )
     pg_metrics = {
         "actor/ppo_kl": ppo_kl_abs.detach().item(),
     }
@@ -1271,7 +1301,7 @@ def compute_policy_loss_geo_mean(
     advantages: torch.Tensor,
     response_mask: torch.Tensor,
     loss_agg_mode: str = "token-mean",
-    config: Optional[DictConfig | AlgoConfig] = None,
+    config: Optional[ActorConfig] = None,
     rollout_is_weights: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """
@@ -1558,6 +1588,7 @@ def compute_policy_loss_with_rollout_correction(
     advantages,
     eos_mask,
     loss_agg_mode="seq-mean-token-sum",
+    config: Optional[ActorConfig] = None,
     loss_scale_factor=1.0,
     rollout_is: Optional[str] = None,
     rollout_is_threshold: float = 2.0,
@@ -1565,6 +1596,7 @@ def compute_policy_loss_with_rollout_correction(
     rollout_rs_threshold: Optional[float] = None,
     rollout_rs_threshold_lower: Optional[float] = None,
     rollout_token_veto_threshold: Optional[float] = None,
+    rollout_is_batch_normalize: bool = False,
 ):
     """Compute policy loss with pure rollout correction (no PPO clipping).
 
@@ -1598,15 +1630,7 @@ def compute_policy_loss_with_rollout_correction(
         rollout_rs_threshold: Upper threshold for rejection sampling.
         rollout_rs_threshold_lower: Lower threshold for rejection sampling.
         rollout_token_veto_threshold: Per-token veto threshold for catastrophic outliers.
-
-    Returns:
-        Tuple of (loss, clip_fraction, kl_divergence, clip_fraction_lower):
-            - loss: Policy gradient loss with IS correction
-            - clip_fraction: Always 0.0 (no clipping in this mode)
-            - kl_divergence: KL between current and rollout policy
-            - clip_fraction_lower: Always 0.0 (no clipping in this mode)
-        Note: Rollout correction metrics are computed internally but not returned.
-              Caller should compute them separately if needed.
+        rollout_is_batch_normalize: Whether to normalize IS weights to have mean=1.0 per batch.
 
     Note:
         Unlike compute_policy_loss (PPO), this function:
@@ -1616,40 +1640,43 @@ def compute_policy_loss_with_rollout_correction(
 
     Usage:
         This function is called by the actor when:
-        - bypass_old_logprob_for_rollout=True (trainer uses rollout_log_prob as old_log_prob)
-        - use_pure_rollout_correction=True (actor uses this function instead of compute_policy_loss)
+        - bypass_mode=True (trainer uses rollout_log_prob as old_log_prob)
+        - use_policy_gradient=True (actor uses this function instead of compute_policy_loss)
 
     Example config:
         algorithm:
           rollout_correction:
-            bypass_old_logprob_for_rollout: true
-            use_pure_rollout_correction: true
+            bypass_mode: true
+            use_policy_gradient: true
             rollout_is: "token"
             rollout_is_threshold: 2.0
             rollout_rs: "token"
             rollout_rs_threshold: 2.0
             rollout_rs_threshold_lower: 0.5
 
-    Performance:
-        - Memory: Saves ~1MB per batch (no old_log_prob storage)
-        - Speed: ~15-20% faster (skips actor.compute_log_prob())
-        - Variance: Higher than PPO (no clipping safety net)
     """
     # Import rollout correction helper
     from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_rejection_mask
 
+    assert config is not None, "ActorConfig must be provided for rollout correction"
+
     # Compute IS weights and rejection mask on-the-fly
-    rollout_is_weights_proto, modified_response_mask, rollout_metrics = compute_rollout_correction_and_rejection_mask(
-        old_log_prob=log_prob,  # Current policy
-        rollout_log_prob=rollout_log_prob,  # Rollout policy
-        response_mask=eos_mask,
-        rollout_is=rollout_is,
-        rollout_is_threshold=rollout_is_threshold,
-        rollout_rs=rollout_rs,
-        rollout_rs_threshold=rollout_rs_threshold,
-        rollout_rs_threshold_lower=rollout_rs_threshold_lower,
-        rollout_token_veto_threshold=rollout_token_veto_threshold,
-    )
+    # Use no_grad since weights are detached inside and metrics don't need gradients
+    with torch.no_grad():
+        rollout_is_weights_proto, modified_response_mask, rollout_metrics = (
+            compute_rollout_correction_and_rejection_mask(
+                old_log_prob=log_prob,  # Current policy
+                rollout_log_prob=rollout_log_prob,  # Rollout policy
+                response_mask=eos_mask,
+                rollout_is=rollout_is,
+                rollout_is_threshold=rollout_is_threshold,
+                rollout_rs=rollout_rs,
+                rollout_rs_threshold=rollout_rs_threshold,
+                rollout_rs_threshold_lower=rollout_rs_threshold_lower,
+                rollout_token_veto_threshold=rollout_token_veto_threshold,
+                rollout_is_batch_normalize=rollout_is_batch_normalize,
+            )
+        )
 
     # Extract weights tensor from DataProto (or None if disabled)
     rollout_is_weights = rollout_is_weights_proto.batch["rollout_is_weights"] if rollout_is_weights_proto else None
@@ -1665,15 +1692,10 @@ def compute_policy_loss_with_rollout_correction(
     # So we apply it to the standard log-prob trick formula
 
     if rollout_is_weights is not None:
-        # With IS correction: weight the log-prob trick by IS weight
-        # w = exp(log_prob - rollout_log_prob).clamp(max=threshold)
-        # L = -E[w * log π * A]
-        # Gradient: ∇L = -E[w * ∇log π * A] = -E[w * A]
+        # IS-corrected policy gradient: L = -E[stopgrad(w) · log π · A]
         pg_losses = -advantages * log_prob * rollout_is_weights
     else:
-        # No IS correction: standard REINFORCE with log-prob trick
-        # L = -E[log π(a|s) * A]
-        # Gradient: ∇L = -E[∇log π * A] = -E[A]
+        # Standard REINFORCE: L = -E[log π · A]
         pg_losses = -advantages * log_prob
 
     # Aggregate loss (apply scale factor manually)
@@ -1682,6 +1704,7 @@ def compute_policy_loss_with_rollout_correction(
             loss_mat=pg_losses,
             loss_mask=effective_mask,
             loss_agg_mode=loss_agg_mode,
+            **config.global_batch_info,
         )
         * loss_scale_factor
     )
@@ -1707,12 +1730,12 @@ def compute_policy_loss_rollout_correction_wrapper(
     advantages: torch.Tensor,
     response_mask: torch.Tensor,
     loss_agg_mode: str = "token-mean",
-    config: Optional[DictConfig | AlgoConfig] = None,
+    config: Optional[ActorConfig] = None,
     rollout_is_weights: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Wrapper for compute_policy_loss_with_rollout_correction to match PolicyLossFn interface.
 
-    This function is used when algorithm.rollout_correction.use_pure_rollout_correction=True.
+    This function is used when algorithm.rollout_correction.use_policy_gradient=True.
     In this mode, the trainer has already set old_log_prob=rollout_log_prob (bypass mode).
 
     Args:
@@ -1723,14 +1746,11 @@ def compute_policy_loss_rollout_correction_wrapper(
         loss_agg_mode: Loss aggregation mode
         config: Actor config containing rollout_correction settings
         rollout_is_weights: Pre-computed IS weights (ignored, computed internally)
-
-    Returns:
-        Tuple of (loss, clip_fraction, kl, clip_fraction_lower)
     """
     assert config is not None, "config is required for rollout_correction loss mode"
 
     # Extract rollout_correction config
-    # In ray_trainer, when use_pure_rollout_correction=True, the rollout_correction config
+    # In ray_trainer, when use_policy_gradient=True, the rollout_correction config
     # is embedded in actor config's policy_loss field
     rollout_corr_config = config.policy_loss.get("rollout_correction", None) if hasattr(config, "policy_loss") else None
 
@@ -1747,6 +1767,7 @@ def compute_policy_loss_rollout_correction_wrapper(
     rollout_rs_threshold = rollout_corr_config.get("rollout_rs_threshold", None)
     rollout_rs_threshold_lower = rollout_corr_config.get("rollout_rs_threshold_lower", None)
     rollout_token_veto_threshold = rollout_corr_config.get("rollout_token_veto_threshold", None)
+    rollout_is_batch_normalize = rollout_corr_config.get("rollout_is_batch_normalize", False)
 
     # Call the actual implementation
     # In bypass mode, old_log_prob IS rollout_log_prob
@@ -1756,6 +1777,7 @@ def compute_policy_loss_rollout_correction_wrapper(
         advantages=advantages,
         eos_mask=response_mask,
         loss_agg_mode=loss_agg_mode,
+        config=config,
         loss_scale_factor=1.0,
         rollout_is=rollout_is,
         rollout_is_threshold=rollout_is_threshold,
@@ -1763,4 +1785,5 @@ def compute_policy_loss_rollout_correction_wrapper(
         rollout_rs_threshold=rollout_rs_threshold,
         rollout_rs_threshold_lower=rollout_rs_threshold_lower,
         rollout_token_veto_threshold=rollout_token_veto_threshold,
+        rollout_is_batch_normalize=rollout_is_batch_normalize,
     )

@@ -17,12 +17,26 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from verl.base_config import BaseConfig
+from verl.trainer.config import CheckpointConfig
 
-__all__ = ["FSDPEngineConfig", "McoreEngineConfig"]
+from .model import HFModelConfig
+from .optimizer import OptimizerConfig
+
+__all__ = ["FSDPEngineConfig", "McoreEngineConfig", "TrainingWorkerConfig"]
 
 
 @dataclass
-class McoreEngineConfig(BaseConfig):
+class EngineConfig(BaseConfig):
+    param_offload: bool = False
+    optimizer_offload: bool = False
+    grad_offload: bool = False
+    forward_only: bool = False
+    strategy: str = None
+    dtype: str = "bfloat16"  # ["bfloat16", "float16"]
+
+
+@dataclass
+class McoreEngineConfig(EngineConfig):
     """Configuration for Megatron parallelism.
 
     The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
@@ -46,14 +60,12 @@ class McoreEngineConfig(BaseConfig):
         override_ddp_config (dict[str, Any]): Override configuration for DDP.
         override_transformer_config (dict[str, Any]): Override configuration for transformer.
         use_mbridge (bool): Whether to use MBridge for communication.
+        dtype (str): Mixed precision training param dtype, default "bfloat16"
     """
 
     # sequence_parallel is not listed as a frozen field for auto-correction purpose
     _mutable_fields = BaseConfig._mutable_fields | {"sequence_parallel"}
-
-    param_offload: bool = False
-    grad_offload: bool = False
-    optimizer_offload: bool = False
+    # mcore parallelism
     tensor_model_parallel_size: int = 1
     expert_model_parallel_size: int = 1
     expert_tensor_parallel_size: Optional[int] = None
@@ -64,24 +76,26 @@ class McoreEngineConfig(BaseConfig):
     use_distributed_optimizer: bool = True
     use_dist_checkpointing: bool = False
     dist_checkpointing_path: Optional[str] = None
+    dist_checkpointing_prefix: str = ""
     seed: int = 42
     override_ddp_config: dict[str, Any] = field(default_factory=dict)
     override_transformer_config: dict[str, Any] = field(default_factory=dict)
     override_mcore_model_config: dict[str, Any] = field(default_factory=dict)
     use_mbridge: bool = False
-    forward_only: bool = False
+    vanilla_mbridge: bool = True
     strategy: str = "megatron"
 
     def __post_init__(self) -> None:
         """config validation logics go here"""
         assert self.strategy == "megatron"
+        assert self.dtype in ["bfloat16", "float16"], f"dtype {self.dtype} not supported"
         if self.tensor_model_parallel_size == 1:
             warnings.warn("set sequence parallel to false as TP size is 1", stacklevel=2)
             self.sequence_parallel = False
 
 
 @dataclass
-class FSDPEngineConfig(BaseConfig):
+class FSDPEngineConfig(EngineConfig):
     """Configuration for FSDP (Fully Sharded Data Parallel).
 
     The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
@@ -97,11 +111,14 @@ class FSDPEngineConfig(BaseConfig):
         model_dtype (str): Model data type used to initialize the transformers model. default "fp32"
         use_orig_params (bool): Whether to use original parameters when initialize FSDP1, default False
         mixed_precision (Optional[dict[str, Any]]): Mixed precision configuration for FSDP, default None
+        dtype (str): Mixed precision training param dtype, default "bfloat16"
     """
 
+    # ulysses_sequence_parallel_size is mutable for backward compatibility
+    _mutable_fields = BaseConfig._mutable_fields | {"ulysses_sequence_parallel_size"}
+
+    # fsdp specific flags
     wrap_policy: dict[str, Any] = field(default_factory=dict)
-    param_offload: bool = False
-    optimizer_offload: bool = False
     offload_policy: bool = False
     reshard_after_forward: bool = True
     fsdp_size: int = -1
@@ -113,8 +130,16 @@ class FSDPEngineConfig(BaseConfig):
     entropy_from_logits_with_chunking: bool = False
     use_torch_compile: bool = True
     entropy_checkpointing: bool = False
-    forward_only: bool = False
     strategy: str = "fsdp"
 
     def __post_init__(self):
         assert self.strategy in ["fsdp", "fsdp2"], f"strategy {self.strategy} not supported"
+
+
+@dataclass
+class TrainingWorkerConfig(BaseConfig):
+    model_type: str = None  # model type (language_model/value_model)
+    model_config: HFModelConfig = None
+    engine_config: EngineConfig = None
+    optimizer_config: OptimizerConfig = None
+    checkpoint_config: CheckpointConfig = None
