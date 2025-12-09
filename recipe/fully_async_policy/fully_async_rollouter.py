@@ -96,14 +96,34 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
         from verl.utils.dataset.rl_dataset import collate_fn
 
-        train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor)
-        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
-        train_sampler = create_rl_sampler(config.data, train_dataset)
+        self.train_dataset = create_rl_dataset(None, config.data, tokenizer, processor)
+        self.val_dataset = create_rl_dataset(None, config.data, tokenizer, processor)
+        dataset_sampler = create_rl_sampler(config.data, self.train_dataset)
 
         self._validate_config()
-        print(f"[FullyAsyncRollouter] Rollouter _create_dataloader...\n{train_dataset}\n{val_dataset}")
+        print(f"[FullyAsyncRollouter] Rollouter creating dataloader...")
 
-        self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
+        from torch.utils.data import Dataset, Sampler, SequentialSampler
+        from torchdata.stateful_dataloader import StatefulDataLoader
+        from verl.utils.dataset.rl_dataset import collate_fn
+        dataset_sampler = SequentialSampler(self.train_dataset)
+        self.train_dataloader = StatefulDataLoader(
+            dataset=self.train_dataset,
+            batch_size=1,
+            num_workers=0,
+            drop_last=False,
+            collate_fn=collate_fn,
+            sampler=dataset_sampler,
+        )
+
+        self.val_dataloader = StatefulDataLoader(
+            dataset=self.val_dataset,
+            batch_size=1,
+            num_workers=0,
+            drop_last=False,
+            collate_fn=collate_fn,
+            sampler=dataset_sampler,
+        )
 
         # ==================== fully async config ====================
 
@@ -209,6 +229,13 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
     async def update_param_version(self, version: int, validate: bool = False, global_steps: int = 0):
         """Update current parameter version"""
         async with self.lock:
+            #TODO: Add interface "state_switch": (version: int)->(profiling_result: str, corun_benchmarks: str) 
+            #                                    notify the gym to switch cpu benchmarks
+            #TODO(P0)-zh gym: initBench: select a combination of benchmarks randomly
+            #                 runBench: run the benchmarks concurrently for xx seconds, 
+            #                           then returns the profiling result (cpu util, ops) 
+            #                           and selected benchmarks as strings
+            #TODO(P0)-hjl rl: Store the profiling_result and corun_benchmarks into a dict (self.gym_state)
             old_version = self.current_param_version
             self.current_param_version = version
             # every time param change, reset staleness_samples
@@ -384,6 +411,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         for epoch, batch_dict in continuous_iterator:
             # Similar to _prepare_generate_batch: Separate data
             full_batch = prepare_single_generation_data(batch_dict, self.config)
+            #TODO(P0): The raw prompt is inside full_batch, attach the contents in self.gym_state:dict onto the raw prompt
 
             sample_id = f"sample_{epoch}_{self.global_steps}"
 

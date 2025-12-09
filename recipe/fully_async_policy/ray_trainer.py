@@ -159,6 +159,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     def _init_async_rollout_manager(self):
         pass
 
+    def _validate(self):
+        #TODO(P0)-zsl: check if we need to overwrite the _validate function, notify the remote sandbox with slice id
+        pass
+
     def fit(self):
         """
         The training loop of PPO.
@@ -342,6 +346,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 reward_tensor = self.rm_wg.compute_rm_score(batch)
                 batch = batch.union(reward_tensor)
 
+            #TODO(P0)-zsl: See if we can extract tool_reward from 'batch', since in partial_tool_agent_loop
+            # tool_rewards has been updated. Otherwise, call get_reward according to the request_id
+            #TODO(P0)-zh/hjl: Add interface "get_reward": (request_id: int)->(reward_score: float) # request_id should be extracted from 'batch'
             if self.config.reward_model.launch_reward_fn_async:
                 future_reward = compute_reward_async.remote(data=batch, reward_fn=self.reward_fn)
             else:

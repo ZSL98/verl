@@ -91,6 +91,12 @@ class RLHFDataset(Dataset):
         processor: Optional[ProcessorMixin] = None,
         max_samples: int = -1,
     ):
+        #TODO(P1): skip_load_from_files should be in the config
+        skip_load_from_files = True
+        if skip_load_from_files:
+            self._read_files_and_tokenize()
+            return
+
         if not isinstance(data_files, list | ListConfig):
             data_files = [data_files]
 

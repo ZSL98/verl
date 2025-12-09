@@ -142,8 +142,7 @@ class ParameterSynchronizer:
         # Update MQ version
         self.mq_client.update_param_version_sync(version)
 
-        # ray.get(self.rollout_wg.load_weight())
-        # ray.get(self.rollouter.)
+        #TODO(P1)-zh: Integrate ckpt engine
     
         end_time = time.time()
         print(f"[ParameterSynchronizer] sync_weights success. cost {end_time - start_time:.2f} seconds")

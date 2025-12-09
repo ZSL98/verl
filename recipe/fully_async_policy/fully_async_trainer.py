@@ -248,6 +248,16 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
         # get validate data before training
         self._log_validation_data()
 
+        # perform validation before training
+        # currently, we only support validation using the reward_function.
+        if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
+            val_metrics = self._validate()
+            assert val_metrics, f"{val_metrics=}"
+            pprint(f"Initial validation metrics: {val_metrics}")
+            self.logger.log(data=val_metrics, step=self.global_steps)
+            if self.config.trainer.get("val_only", False):
+                return
+
         # Use queue mode, no need for traditional dataloader iterator
         # Initialize to get the first batch of data
         while True:

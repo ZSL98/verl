@@ -233,6 +233,13 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
         else:
             return AgentState.TERMINATED
 
+    #TODO(P0): Add interface "tool_execute": (tool_action: str, request_id: int)->(confirmed: bool) 
+    # send a tool action (e.g., 'numactl ...') and the unique request id to the sandbox, and return a confirmation
+    #TODO(P0)-hjl: Overwrite the _handle_processing_tools_state/_call_tool function to call tools in the sandbox
+    # async def _handle_processing_tools_state(self):
+    # async def _call_tool(self):
+    #TODO(P0)-zh: Run the tool command
+
     def _build_completed_output(self, agent_data: AgentData, param_version: int) -> AgentLoopOutput:
         """build completed output"""
         response_ids = agent_data.prompt_ids[-len(agent_data.response_mask) :]
@@ -250,6 +257,7 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
             metrics=agent_data.metrics,
             extra_fields={},
         )
+        #TODO(P0)-zsl: request_id should be extracted for later get reward
         output.extra_fields.update(
             {
                 "turn_scores": agent_data.turn_scores,
