@@ -5,6 +5,7 @@ import traceback
 import shlex
 import time
 import re
+from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Optional, Any
 import threading
@@ -27,6 +28,7 @@ queue_lock = threading.Lock()
 is_processing = False
 completed_results: Dict[str, Any] = {}
 processing_requests = set()
+benchmark_runner_proc: Optional[subprocess.Popen] = None
 
 # 4. NUMA/CPU合法性校验正则
 NUMA_NODE_PATTERN = re.compile(r"^\d+$")  # 数字格式的NUMA节点
@@ -128,6 +130,25 @@ def execute_shell_command(cmd_parts: List[str], timeout: int = 10) -> Dict[str, 
             "stdout": "",
             "stderr": f"命令执行失败：{str(e)}"
         }
+
+
+def start_benchmark_runner() -> None:
+    """在服务启动时后台启动benchmark runner"""
+    global benchmark_runner_proc
+    try:
+        runner_path = Path(__file__).resolve().parent.parent / "benchmarks" / "runner.py"
+        if not runner_path.exists():
+            print(f"⚠️ benchmark runner不存在：{runner_path}")
+            return
+        benchmark_runner_proc = subprocess.Popen(
+            ["python3", str(runner_path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True
+        )
+        print(f"🚀 benchmark runner已启动，PID={benchmark_runner_proc.pid}")
+    except Exception as e:
+        print(f"❌ 启动benchmark runner失败：{e}")
 
 def sample_process_state(pid: int) -> Dict[str, Any]:
     """采集指定进程的ps/lscpu/perf信息"""
@@ -274,6 +295,12 @@ def process_queue():
     finally:
         with queue_lock:
             is_processing = False
+
+
+@app.on_event("startup")
+async def on_startup():
+    """服务启动时触发benchmark runner"""
+    threading.Thread(target=start_benchmark_runner, daemon=True).start()
 
 # ======================== API接口 ========================
 @app.post("/bind-tasks")
