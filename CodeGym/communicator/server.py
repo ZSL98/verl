@@ -4,10 +4,9 @@ import subprocess
 import traceback
 import shlex
 import time
-import os
 import re
-from dataclasses import dataclass
-from typing import List, Dict, Optional
+from dataclasses import dataclass, asdict
+from typing import List, Dict, Optional, Any
 import threading
 
 # 初始化FastAPI应用
@@ -23,9 +22,11 @@ ALLOWED_BASE_COMMANDS = {
 }
 
 # 3. 任务队列（FIFO）+ 锁（保证线程安全）
-task_queue: List[Dict] = []
+task_queue: List[Dict[str, Any]] = []
 queue_lock = threading.Lock()
 is_processing = False
+completed_results: Dict[str, Any] = {}
+processing_requests = set()
 
 # 4. NUMA/CPU合法性校验正则
 NUMA_NODE_PATTERN = re.compile(r"^\d+$")  # 数字格式的NUMA节点
@@ -33,13 +34,21 @@ CPU_LIST_PATTERN = re.compile(r"^\d+(,\d+)*(-\d+)*$")  # 支持1,2,3 或 0-7格�
 
 # ======================== 数据结构定义 ========================
 @dataclass
-class TaskResult:
-    """任务执行结果封装"""
-    task_id: str
+class BindCommandResult:
+    """单条绑核指令的执行与采样结果"""
+    command: str
+    pid: Optional[int]
     bind_success: bool
-    run_success: bool
-    sample_results: Dict[str, str]
+    sample_results: Dict[str, Any]
     exit_code: int
+    error_msg: str = ""
+
+@dataclass
+class BindTaskResult:
+    """绑核任务（包含多条指令）的整体结果"""
+    request_id: str
+    success: bool
+    command_results: List[BindCommandResult]
     error_msg: str = ""
 
 # ======================== 工具函数 ========================
@@ -120,121 +129,121 @@ def execute_shell_command(cmd_parts: List[str], timeout: int = 10) -> Dict[str, 
             "stderr": f"命令执行失败：{str(e)}"
         }
 
-def process_numa_task(task_params: Dict) -> TaskResult:
-    """
-    处理NUMA绑核任务核心逻辑：
-    1. 校验参数 → 2. 绑核启动任务 → 3. 运行1秒 → 4. 性能采样 → 5. 终止任务 → 6. 返回结果
-    """
-    task_id = task_params["task_id"]
-    numa_node = task_params["numa_node"]
-    cpu_list = task_params["cpu_list"]
-    run_command = task_params["run_command"]
-    timeout = task_params.get("timeout", 30)
+def sample_process_state(pid: int) -> Dict[str, Any]:
+    """采集指定进程的ps/lscpu/perf信息"""
+    samples: Dict[str, Any] = {}
 
-    # 初始化结果
-    task_result = TaskResult(
-        task_id=task_id,
+    ps_cmd = f"ps -ef | grep {pid} | grep -v grep"
+    try:
+        ps_result = subprocess.run(
+            ps_cmd,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5,
+            encoding="utf-8",
+            errors="ignore"
+        )
+        samples["ps_ef"] = {
+            "exit_code": ps_result.returncode,
+            "stdout": ps_result.stdout,
+            "stderr": ps_result.stderr
+        }
+    except Exception as e:
+        samples["ps_ef"] = {
+            "exit_code": -2,
+            "stdout": "",
+            "stderr": f"采样失败：{str(e)}"
+        }
+
+    samples["lscpu"] = execute_shell_command(["lscpu"], timeout=5)
+    samples["perf_stat"] = execute_shell_command(
+        ["perf", "stat", "-p", str(pid), "-o", "/dev/stdout", "sleep", "0.5"],
+        timeout=6
+    )
+    return samples
+
+
+def run_single_bind_command(command_str: str) -> BindCommandResult:
+    """执行单条绑核指令，等待1秒后采样，再解除绑核"""
+    result = BindCommandResult(
+        command=command_str,
+        pid=None,
         bind_success=False,
-        run_success=False,
         sample_results={},
         exit_code=-1,
         error_msg=""
     )
+    proc: Optional[subprocess.Popen] = None
+    try:
+        cmd_parts = shlex.split(command_str)
+        if not cmd_parts:
+            result.error_msg = "命令不能为空"
+            return result
+
+        base_cmd = cmd_parts[0]
+        if base_cmd not in ALLOWED_BASE_COMMANDS:
+            result.error_msg = f"禁止执行命令：{base_cmd}（仅允许{ALLOWED_BASE_COMMANDS}）"
+            return result
+
+        proc = subprocess.Popen(
+            cmd_parts,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",
+            errors="ignore"
+        )
+        result.bind_success = True
+        result.pid = proc.pid
+
+        # 运行1秒后采样
+        time.sleep(1)
+        result.sample_results = sample_process_state(proc.pid)
+
+        # 解除绑核：确保进程结束
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=1)
+
+        result.exit_code = proc.returncode if proc else -1
+    except Exception as e:
+        result.error_msg = f"命令执行异常：{str(e)}\n{traceback.format_exc()}"
+        if proc and proc.poll() is None:
+            proc.kill()
+    return result
+
+
+def process_bind_task(task_params: Dict[str, Any]) -> BindTaskResult:
+    """处理一串绑核指令：按顺序执行并采样，返回聚合结果"""
+    request_id = task_params["request_id"]
+    commands: List[str] = task_params["bind_commands"]
+
+    command_results: List[BindCommandResult] = []
+    success = True
+    error_msg = ""
 
     try:
-        # 步骤1：校验NUMA/CPU合法性
-        if not validate_numa_cpu(numa_node, cpu_list):
-            task_result.error_msg = f"非法参数：NUMA节点{numa_node}或CPU核心{cpu_list}不存在"
-            return task_result
-
-        # 步骤2：拆分目标运行命令（防止注入）
-        run_cmd_parts = shlex.split(run_command)
-        if not run_cmd_parts:
-            task_result.error_msg = "运行命令不能为空"
-            return task_result
-
-        # 步骤3：构造绑核命令（numactl绑定NUMA节点+CPU核心）
-        bind_cmd = [
-            "numactl",
-            f"--cpunodebind={numa_node}",
-            f"--membind={numa_node}",
-            f"--physcpubind={cpu_list}",
-            *run_cmd_parts
-        ]
-
-        # 步骤4：启动绑核任务（后台运行）
-        proc = None
-        try:
-            proc = subprocess.Popen(
-                bind_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                encoding="utf-8",
-                errors="ignore"
-            )
-            task_result.bind_success = True
-            pid = proc.pid
-            print(f"✅ 任务{task_id}：绑核成功，PID={pid}（NUMA{numa_node}, CPU{cpu_list}）")
-        except Exception as e:
-            task_result.error_msg = f"绑核启动失败：{str(e)}"
-            return task_result
-
-        # 步骤5：运行1秒（等待任务执行）
-        time.sleep(1)
-
-        # 步骤6：性能采样（ps/ lscpu/ perf stat）
-        sample_cmds = {
-            "ps_ef": ["ps", "-ef", "|", "grep", str(pid)],  # 进程信息
-            "lscpu": ["lscpu"],  # 系统CPU/NUMA信息
-            "perf_stat": ["perf", "stat", "-p", str(pid), "-o", "/dev/stdout", "sleep", "0.5"]  # 性能采样0.5秒
-        }
-
-        # 处理带管道的ps命令（特殊处理，临时允许shell=True）
-        for sample_name, sample_cmd in sample_cmds.items():
-            if sample_name == "ps_ef":
-                # 管道命令需shell=True，加强参数过滤
-                ps_cmd = f"ps -ef | grep {pid} | grep -v grep"
-                try:
-                    ps_result = subprocess.run(
-                        ps_cmd,
-                        shell=True,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        timeout=5,
-                        encoding="utf-8"
-                    )
-                    task_result.sample_results[sample_name] = {
-                        "exit_code": ps_result.returncode,
-                        "stdout": ps_result.stdout,
-                        "stderr": ps_result.stderr
-                    }
-                except Exception as e:
-                    task_result.sample_results[sample_name] = {
-                        "exit_code": -2,
-                        "stdout": "",
-                        "stderr": f"采样失败：{str(e)}"
-                    }
-            else:
-                # 普通命令（无shell注入风险）
-                sample_result = execute_shell_command(sample_cmd, timeout=5)
-                task_result.sample_results[sample_name] = sample_result
-
-        # 步骤7：终止任务（取消绑核，任务结束）
-        if proc.poll() is None:  # 进程仍在运行
-            proc.terminate()
-            proc.wait(timeout=2)
-        task_result.run_success = True
-        task_result.exit_code = 0
-        task_result.error_msg = ""
-        print(f"✅ 任务{task_id}：执行完成，已终止PID={pid}")
-
+        for cmd in commands:
+            single_result = run_single_bind_command(cmd)
+            command_results.append(single_result)
+            if not single_result.bind_success:
+                success = False
+                if not error_msg:
+                    error_msg = single_result.error_msg
     except Exception as e:
-        task_result.error_msg = f"任务执行异常：{str(e)}\n{traceback.format_exc()}"
-        # 清理残留进程
-        if 'proc' in locals() and proc and proc.poll() is None:
-            proc.kill()
+        success = False
+        error_msg = f"任务执行异常：{str(e)}\n{traceback.format_exc()}"
 
-    return task_result
+    return BindTaskResult(
+        request_id=request_id,
+        success=success,
+        command_results=command_results,
+        error_msg=error_msg
+    )
 
 def process_queue():
     """处理任务队列（后台线程，串行执行）"""
@@ -250,86 +259,99 @@ def process_queue():
                 if not task_queue:
                     break
                 current_task = task_queue.pop(0)  # FIFO
+                processing_requests.add(current_task["request_id"])
 
-            # 处理当前任务
-            result = process_numa_task(current_task)
+            try:
+                result = process_bind_task(current_task)
+            finally:
+                with queue_lock:
+                    processing_requests.discard(current_task["request_id"])
+
             # 存储结果（供调用方获取，这里简化为内存存储，生产环境可改用Redis/数据库）
-            current_task["result"] = result
-            current_task["completed"] = True
+            with queue_lock:
+                completed_results[result.request_id] = result
 
     finally:
         with queue_lock:
             is_processing = False
 
 # ======================== API接口 ========================
-@app.post("/submit-numa-task")
-async def submit_numa_task(
-    # 结构化任务参数
-    task_id: str = Body(..., description="唯一任务ID"),
-    numa_node: str = Body(..., description="要绑定的NUMA节点（如0）"),
-    cpu_list: str = Body(..., description="要绑定的CPU核心（如0-7或1,3,5）"),
-    run_command: str = Body(..., description="要运行的目标命令（如./compute_intensive -t 1）"),
-    timeout: int = Body(30, description="任务总超时时间（秒）"),
+@app.post("/bind-tasks")
+async def submit_bind_tasks(
+    request_id: str = Body(..., description="唯一请求ID"),
+    bind_commands: List[str] = Body(..., description="一串绑核指令（按顺序执行）"),
     x_api_key: str = Header(None, description="API鉴权Key")
 ):
-    """
-    提交NUMA绑核任务（阻塞式返回结果）
-    流程：绑核→运行1秒→性能采样→终止任务→返回结果
-    """
-    # 1. 鉴权校验
+    """提交绑核指令序列，放入队列按顺序执行（异步，立即返回）"""
     if x_api_key != AUTH_API_KEY:
         raise HTTPException(status_code=401, detail="未授权：API Key错误")
 
-    # 2. 校验任务ID唯一性
+    if not bind_commands:
+        raise HTTPException(status_code=400, detail="bind_commands不能为空")
+
     with queue_lock:
-        if any(task["task_id"] == task_id for task in task_queue):
-            raise HTTPException(status_code=400, detail=f"任务ID{task_id}已存在，请勿重复提交")
+        duplicate = (
+            any(task["request_id"] == request_id for task in task_queue)
+            or request_id in completed_results
+            or request_id in processing_requests
+        )
+        if duplicate:
+            raise HTTPException(status_code=400, detail=f"请求ID{request_id}已存在，请勿重复提交")
 
-    # 3. 构造任务参数
-    task_params = {
-        "task_id": task_id,
-        "numa_node": numa_node,
-        "cpu_list": cpu_list,
-        "run_command": run_command,
-        "timeout": timeout,
-        "completed": False,
-        "result": None
-    }
+        task_queue.append({"request_id": request_id, "bind_commands": bind_commands})
+        queued_size = len(task_queue)
 
-    # 4. 加入任务队列
-    with queue_lock:
-        task_queue.append(task_params)
-
-    # 5. 触发队列处理
     threading.Thread(target=process_queue, daemon=True).start()
 
-    # 6. 阻塞等待任务完成（调用方阻塞）
-    wait_start = time.time()
-    while time.time() - wait_start < timeout:
-        if task_params.get("completed", False):
-            break
-        time.sleep(0.1)  # 轮询间隔
-
-    # 7. 检查超时
-    if not task_params.get("completed", False):
-        raise HTTPException(status_code=504, detail=f"任务{task_id}执行超时（{timeout}秒）")
-
-    # 8. 返回结果
-    result = task_params["result"]
     return JSONResponse(
         status_code=200,
         content={
-            "code": 200 if result.exit_code == 0 else 500,
-            "msg": result.error_msg if result.error_msg else "任务执行完成",
+            "code": 200,
+            "msg": "任务已入队，等待执行",
             "data": {
-                "task_id": result.task_id,
-                "bind_success": result.bind_success,
-                "run_success": result.run_success,
-                "exit_code": result.exit_code,
-                "sample_results": result.sample_results
+                "request_id": request_id,
+                "queue_size": queued_size
             }
         }
     )
+
+
+@app.get("/bind-tasks/{request_id}")
+async def query_bind_result(
+    request_id: str,
+    x_api_key: str = Header(None, description="API鉴权Key")
+):
+    """根据request_id查询绑核采样结果（运行中/未找到/已完成）"""
+    if x_api_key != AUTH_API_KEY:
+        raise HTTPException(status_code=401, detail="未授权：API Key错误")
+
+    with queue_lock:
+        if request_id in completed_results:
+            result = completed_results[request_id]
+            result_dict = asdict(result)
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "code": 200 if result.success else 500,
+                    "msg": result.error_msg if result.error_msg else "任务执行完成",
+                    "data": result_dict
+                }
+            )
+
+        queued = any(task["request_id"] == request_id for task in task_queue)
+        running = request_id in processing_requests
+
+    if queued or running:
+        return JSONResponse(
+            status_code=202,
+            content={
+                "code": 202,
+                "msg": "任务正在执行，请稍后查询",
+                "data": {"request_id": request_id}
+            }
+        )
+
+    raise HTTPException(status_code=404, detail=f"请求ID{request_id}不存在")
 
 # 健康检查接口
 @app.get("/health")
