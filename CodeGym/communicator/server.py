@@ -150,6 +150,17 @@ def start_benchmark_runner() -> None:
     except Exception as e:
         print(f"❌ 启动benchmark runner失败：{e}")
 
+def collect_baseline_sample() -> Dict[str, Any]:
+    """采集初始状态的ps/lscpu/perf stat"""
+    return {
+        "ps_ef": execute_shell_command(["ps", "-ef"], timeout=5),
+        "lscpu": execute_shell_command(["lscpu"], timeout=5),
+        "perf_stat": execute_shell_command(
+            ["perf", "stat", "sleep", "0.5"],
+            timeout=6
+        )
+    }
+
 def sample_process_state(pid: int) -> Dict[str, Any]:
     """采集指定进程的ps/lscpu/perf信息"""
     samples: Dict[str, Any] = {}
@@ -379,6 +390,23 @@ async def query_bind_result(
         )
 
     raise HTTPException(status_code=404, detail=f"请求ID{request_id}不存在")
+
+@app.get("/baseline-sample")
+async def baseline_sample(
+    x_api_key: str = Header(None, description="API鉴权Key")
+):
+    """返回当前机器的初始ps/lscpu/perf采样结果"""
+    if x_api_key != AUTH_API_KEY:
+        raise HTTPException(status_code=401, detail="未授权：API Key错误")
+    samples = collect_baseline_sample()
+    return JSONResponse(
+        status_code=200,
+        content={
+            "code": 200,
+            "msg": "基线采样完成",
+            "data": samples
+        }
+    )
 
 # 健康检查接口
 @app.get("/health")
