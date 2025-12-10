@@ -165,6 +165,41 @@ def collect_baseline_sample() -> Dict[str, Any]:
         )
     }
 
+def _is_intensive_command(tokens: List[str]) -> bool:
+    """判断命令行中是否包含 *intensive 的二进制"""
+    for token in tokens:
+        name = Path(token).name
+        if name.endswith("intensive"):
+            return True
+    return False
+
+
+def _pid_is_intensive(pid: int) -> bool:
+    """检查给定PID是否对应 *intensive 结尾的任务"""
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+        for part in cmdline:
+            if not part:
+                continue
+            if Path(part.decode(errors="ignore")).name.endswith("intensive"):
+                return True
+    except Exception:
+        pass
+    try:
+        ps = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "comm="],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=3
+        )
+        for line in ps.stdout.splitlines():
+            if Path(line.strip()).name.endswith("intensive"):
+                return True
+    except Exception:
+        pass
+    return False
+
 
 def random_generate_load_counts() -> Dict[str, int]:
     load_counts: Dict[str, int] = {}
@@ -340,6 +375,11 @@ def run_single_bind_command(command_str: str) -> BindCommandResult:
             result.error_msg = f"禁止执行命令：{base_cmd}（仅允许{ALLOWED_BASE_COMMANDS}）"
             return result
 
+        # 绑定对象必须是 *intensive 任务
+        if base_cmd == "numactl" and not _is_intensive_command(cmd_parts):
+            result.error_msg = "numactl 绑定的目标命令必须是 *intensive 二进制"
+            return result
+
         sample_pid: Optional[int] = None
         if base_cmd == "taskset":
             for token in reversed(cmd_parts):
@@ -348,6 +388,9 @@ def run_single_bind_command(command_str: str) -> BindCommandResult:
                     break
             if sample_pid is None:
                 result.error_msg = "taskset绑核缺少目标PID"
+                return result
+            if not _pid_is_intensive(sample_pid):
+                result.error_msg = f"PID {sample_pid} 不是 *intensive 结尾的任务，拒绝绑核"
                 return result
 
         proc = subprocess.Popen(
