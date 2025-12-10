@@ -276,13 +276,10 @@ def sample_process_state(pid: int) -> Dict[str, Any]:
     """采集指定进程的ps/lscpu/perf信息"""
     samples: Dict[str, Any] = {}
 
-    samples["ps_ef"] = execute_shell_command(["ps", "-fp", str(pid)], timeout=5)
-
+    # 与基线采样保持一致：全量ps/lscpu/perf
+    samples["ps_ef"] = execute_shell_command(["ps", "-ef"], timeout=5)
     samples["lscpu"] = execute_shell_command(["lscpu"], timeout=5)
-    samples["perf_stat"] = execute_shell_command(
-        ["perf", "stat", "-p", str(pid), "-o", "/dev/stdout", "sleep", "0.5"],
-        timeout=6
-    )
+    samples["perf_stat"] = execute_shell_command(["perf", "stat", "sleep", "0.5"], timeout=6)
     return samples
 
 
