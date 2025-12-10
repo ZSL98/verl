@@ -35,6 +35,7 @@ processing_requests = set()
 NUMA_NODE_PATTERN = re.compile(r"^\d+$")  # 数字格式的NUMA节点
 CPU_LIST_PATTERN = re.compile(r"^\d+(,\d+)*(-\d+)*$")  # 支持1,2,3 或 0-7格式
 BENCHMARK_DIR = Path(__file__).resolve().parent.parent / "benchmarks"
+BENCHMARK_BIN_DIR = BENCHMARK_DIR / "cpubench"
 DISK_TEST_FILE = BENCHMARK_DIR / "disk_test.tmp"
 TEST_DURATION = 60
 LOAD_COUNT_RANGE: Dict[str, tuple] = {
@@ -175,100 +176,134 @@ def random_generate_load_counts() -> Dict[str, int]:
         load_counts["compute"] = 1
     return load_counts
 
-
-def _run_compute_load(duration: int) -> None:
-    end = time.time() + duration
-    x = 1
-    while time.time() < end:
-        x = (x * 3 + 7) % 10000019  # 简单CPU计算
-
-
-def _run_mem_load(duration: int) -> None:
-    end = time.time() + duration
-    chunk = bytearray(MEM_GRANULARITY * 1024)
-    pool = [chunk[:] for _ in range(min(MEM_THREADS, 16))]
-    idx = 0
-    while time.time() < end:
-        pool[idx % len(pool)][0] = (pool[idx % len(pool)][0] + 1) % 256
-        idx += 1
+def check_benchmark_dependencies() -> bool:
+    """检查benchmark可执行文件是否存在且可执行"""
+    required = [
+        BENCHMARK_BIN_DIR / "compute_intensive",
+        BENCHMARK_BIN_DIR / "mem_intensive",
+        BENCHMARK_BIN_DIR / "cache_sensitive",
+        BENCHMARK_BIN_DIR / "io_disk_intensive"
+    ]
+    missing = [str(p) for p in required if not p.exists() or not os.access(p, os.X_OK)]
+    if missing:
+        print(f"错误：缺少可执行文件或权限不足：{', '.join(missing)}")
+        return False
+    return True
 
 
-def _run_cache_load(duration: int) -> None:
-    end = time.time() + duration
-    data = [i for i in range(1024 * 16)]
-    idx = 0
-    while time.time() < end:
-        data[idx % len(data)] ^= 1
-        idx += 1
+def build_load_command(load_name: str) -> List[str]:
+    if load_name == "compute":
+        return [
+            str(BENCHMARK_BIN_DIR / "compute_intensive"),
+            "-t", str(COMPUTE_THREADS),
+            "-T", str(COMPUTE_THREADS),
+            "-f", "0",
+            "-d", "0",
+            "-r", str(TEST_DURATION)
+        ]
+    if load_name == "mem":
+        return [
+            str(BENCHMARK_BIN_DIR / "mem_intensive"),
+            "-t", str(MEM_THREADS),
+            "-T", str(MEM_THREADS),
+            "-M", str(MEM_SIZE_MB),
+            "-g", str(MEM_GRANULARITY),
+            "-s", str(MEM_SEQUENTIAL),
+            "-f", "0",
+            "-d", "0",
+            "-r", str(TEST_DURATION)
+        ]
+    if load_name == "cache":
+        return [
+            str(BENCHMARK_BIN_DIR / "cache_sensitive"),
+            "-t", str(CACHE_THREADS),
+            "-T", str(CACHE_THREADS),
+            "-C", str(CACHE_SIZE_MB),
+            "-f", "0",
+            "-d", "0",
+            "-r", str(TEST_DURATION)
+        ]
+    if load_name == "disk":
+        return [
+            str(BENCHMARK_BIN_DIR / "io_disk_intensive"),
+            "-t", str(DISK_THREADS),
+            "-T", str(DISK_THREADS),
+            "-p", str(DISK_TEST_FILE),
+            "-F", str(DISK_FILE_SIZE_MB),
+            "-b", str(DISK_BLOCK_SIZE_KB),
+            "-s", str(DISK_SEQUENTIAL),
+            "-R", str(DISK_READ_ONLY),
+            "-f", "0",
+            "-d", "0",
+            "-r", str(TEST_DURATION)
+        ]
+    raise ValueError(f"未知负载类型：{load_name}")
 
 
-def _run_disk_load(duration: int) -> None:
-    end = time.time() + duration
-    try:
-        with open(DISK_TEST_FILE, "wb") as f:
-            block = b"0" * (DISK_BLOCK_SIZE_KB * 1024)
-            while time.time() < end:
-                f.write(block)
-                f.flush()
-                os.fsync(f.fileno())
-    except Exception as e:
-        print(f"⚠️ 磁盘负载异常：{e}")
-    finally:
-        if DISK_TEST_FILE.exists():
-            try:
-                os.remove(DISK_TEST_FILE)
-            except Exception:
-                pass
-
-
-def start_thread_load_instances(load_counts: Dict[str, int]) -> List[threading.Thread]:
-    threads: List[threading.Thread] = []
+def start_load_instances(load_counts: Dict[str, int]) -> List[tuple]:
+    processes = []
     total_instances = sum(load_counts.values())
-    print(f"\n🚀 开始启动 {total_instances} 个benchmark任务线程：")
-    def spawn(load_name: str, target_func):
-        t = threading.Thread(target=target_func, args=(TEST_DURATION,), daemon=True)
-        t.start()
-        return t
-
+    print(f"\n🚀 开始启动 {total_instances} 个benchmark任务进程（按类型随机分配）：")
     for load_name, count in load_counts.items():
         if count <= 0:
             print(f"  - {load_name}: 0 个实例（跳过）")
             continue
-        print(f"  - {load_name}: {count} 个线程实例")
-        target = {
-            "compute": _run_compute_load,
-            "mem": _run_mem_load,
-            "cache": _run_cache_load,
-            "disk": _run_disk_load
-        }[load_name]
+        print(f"  - {load_name}: {count} 个实例")
         for idx in range(1, count + 1):
-            t = spawn(load_name, target)
-            threads.append(t)
-            print(f"    ✅ 已启动 {load_name}[{idx}] 线程")
-    return threads
+            try:
+                cmd = build_load_command(load_name)
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    close_fds=True,
+                    cwd=str(BENCHMARK_DIR)
+                )
+                processes.append((load_name, idx, proc))
+                print(f"    ✅ 已启动 {load_name}[{idx}] (PID: {proc.pid})")
+            except Exception as e:
+                print(f"    ❌ 启动 {load_name}[{idx}] 失败：{str(e)}")
+    return processes
 
 
-def wait_for_threads(threads: List[threading.Thread]) -> None:
-    if not threads:
+def wait_for_processes(processes: List[tuple]) -> None:
+    if not processes:
         return
-    print(f"\n⌛ 等待所有benchmark线程运行 {TEST_DURATION} 秒...")
+    print(f"\n⌛ 等待所有benchmark实例运行 {TEST_DURATION} 秒...")
     start_time = time.time()
-    for t in threads:
-        t.join(timeout=TEST_DURATION + 5)
+    for load_name, idx, proc in processes:
+        try:
+            proc.wait(timeout=TEST_DURATION + 5)
+            exit_code = proc.returncode
+            if exit_code == 0:
+                print(f"✅ {load_name}[{idx}] 运行完成 (退出码: {exit_code})")
+            else:
+                print(f"⚠️ {load_name}[{idx}] 异常退出 (退出码: {exit_code})")
+        except subprocess.TimeoutExpired:
+            print(f"⚠️ {load_name}[{idx}] 运行超时，强制终止")
+            proc.kill()
+    if DISK_TEST_FILE.exists():
+        try:
+            os.remove(DISK_TEST_FILE)
+            print(f"\n🗑️ 已清理磁盘测试文件：{DISK_TEST_FILE}")
+        except Exception as e:
+            print(f"⚠️ 清理磁盘测试文件失败：{str(e)}")
     elapsed = time.time() - start_time
-    print(f"\n📊 所有benchmark线程运行完成，总耗时：{elapsed:.2f} 秒")
+    print(f"\n📊 所有benchmark实例运行完成，总耗时：{elapsed:.2f} 秒")
 
 
 def start_benchmark_workload() -> None:
     """服务启动时直接在当前进程启动随机benchmark负载"""
     try:
+        if not check_benchmark_dependencies():
+            return
         load_counts = random_generate_load_counts()
         print("\n📋 随机生成的benchmark实例数量：")
         for load_name, count in load_counts.items():
             print(f"  - {load_name}: {count} 个")
-        threads = start_thread_load_instances(load_counts)
-        wait_for_threads(threads)
-        print("\n🎉 随机多线程benchmark负载完成！")
+        processes = start_load_instances(load_counts)
+        wait_for_processes(processes)
+        print("\n🎉 随机多进程benchmark负载完成！")
     except Exception as e:
         print(f"❌ benchmark 任务异常：{str(e)}")
 
