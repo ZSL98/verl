@@ -154,6 +154,17 @@ def execute_shell_command(cmd_parts: List[str], timeout: int = 10) -> Dict[str, 
             "stderr": f"命令执行失败：{str(e)}"
         }
 
+def collect_baseline_sample() -> Dict[str, Any]:
+    """采集当前机器的初始ps/lscpu/perf状态"""
+    return {
+        "ps_ef": execute_shell_command(["ps", "-ef"], timeout=5),
+        "lscpu": execute_shell_command(["lscpu"], timeout=5),
+        "perf_stat": execute_shell_command(
+            ["perf", "stat", "sleep", "0.5"],
+            timeout=6
+        )
+    }
+
 
 def check_benchmark_dependencies() -> bool:
     """检查benchmark可执行文件是否存在且可执行"""
@@ -526,6 +537,23 @@ async def query_bind_result(
         )
 
     raise HTTPException(status_code=404, detail=f"请求ID{request_id}不存在")
+
+@app.get("/baseline-sample")
+async def baseline_sample(
+    x_api_key: str = Header(None, description="API鉴权Key")
+):
+    """返回当前机器的初始ps/lscpu/perf采样结果"""
+    if x_api_key != AUTH_API_KEY:
+        raise HTTPException(status_code=401, detail="未授权：API Key错误")
+    samples = collect_baseline_sample()
+    return JSONResponse(
+        status_code=200,
+        content={
+            "code": 200,
+            "msg": "基线采样完成",
+            "data": samples
+        }
+    )
 
 # 健康检查接口
 @app.get("/health")
