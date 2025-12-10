@@ -1,8 +1,8 @@
 import time
 import uuid
 import requests
-import subprocess
 import random
+from pathlib import Path
 from typing import List, Dict, Any
 
 # 容器A的接口地址（因在同一网络，可直接用容器名访问）
@@ -52,6 +52,25 @@ def print_sample_results(title: str, samples: Dict[str, Any]) -> None:
             print(f"stderr:\n{stderr}")
 
 
+def pick_intensive_pid_from_ps(ps_stdout: str) -> int:
+    """从ps -ef输出中随机挑选一个 *intensive 结尾的进程PID"""
+    candidates = []
+    for line in ps_stdout.splitlines():
+        tokens = line.split(None, 7)
+        if len(tokens) < 8:
+            continue
+        pid_str = tokens[1]
+        cmd = tokens[7]
+        if not pid_str.isdigit():
+            continue
+        cmd_parts = cmd.split()
+        if any(Path(part).name.endswith("intensive") for part in cmd_parts):
+            candidates.append(int(pid_str))
+    if not candidates:
+        raise RuntimeError("未找到 *intensive 结尾的进程供绑核")
+    return random.choice(candidates)
+
+
 def main():
     # 1) 初始状态采样
     baseline = fetch_baseline_sample()
@@ -59,15 +78,9 @@ def main():
     if baseline.get("data"):
         print_sample_results("初始状态", baseline["data"])
 
-    # 2) 随机选择一个已有进程并做绑核
-    def pick_random_pid() -> int:
-        ps_out = subprocess.check_output(["ps", "-eo", "pid"], text=True)
-        pids = [int(line.strip()) for line in ps_out.splitlines()[1:] if line.strip().isdigit()]
-        if not pids:
-            raise RuntimeError("没有找到可用的PID")
-        return random.choice(pids)
-
-    target_pid = pick_random_pid()
+    # 2) 从基线ps -ef中选择一个 *intensive 进程做绑核
+    ps_stdout = baseline.get("data", {}).get("ps_ef", {}).get("stdout", "")
+    target_pid = pick_intensive_pid_from_ps(ps_stdout)
     print(f"\n选中的目标PID：{target_pid}")
 
     request_id = f"client-{uuid.uuid4()}"
