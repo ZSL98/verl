@@ -1,10 +1,12 @@
 import time
 import uuid
 import requests
+import subprocess
+import random
 from typing import List, Dict, Any
 
 # 容器A的接口地址（因在同一网络，可直接用容器名访问）
-SERVER_BASE_URL = "http://code-gym:8000"
+SERVER_BASE_URL = "http://127.0.0.1:8000"
 # 鉴权Key（需与容器A的AUTH_API_KEY一致）
 API_KEY = "container-a-secure-key-2025"
 
@@ -57,11 +59,19 @@ def main():
     if baseline.get("data"):
         print_sample_results("初始状态", baseline["data"])
 
-    # 2) 随便发一组绑核指令
+    # 2) 随机选择一个已有进程并做绑核
+    def pick_random_pid() -> int:
+        ps_out = subprocess.check_output(["ps", "-eo", "pid"], text=True)
+        pids = [int(line.strip()) for line in ps_out.splitlines()[1:] if line.strip().isdigit()]
+        if not pids:
+            raise RuntimeError("没有找到可用的PID")
+        return random.choice(pids)
+
+    target_pid = pick_random_pid()
+    print(f"\n选中的目标PID：{target_pid}")
+
     request_id = f"client-{uuid.uuid4()}"
-    bind_commands = [
-        "numactl --physcpubind=0 --membind=0 sleep 2"
-    ]
+    bind_commands = [f"taskset -cp 0 {target_pid}"]
     submit_resp = submit_bind_task(request_id, bind_commands)
     print(f"\n提交结果：code={submit_resp.get('code')} msg={submit_resp.get('msg')} request_id={request_id}")
 
