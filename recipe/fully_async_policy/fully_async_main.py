@@ -25,6 +25,7 @@ from omegaconf import OmegaConf
 from recipe.fully_async_policy.fully_async_rollouter import FullyAsyncRollouter
 from recipe.fully_async_policy.fully_async_trainer import FullyAsyncTrainer
 from recipe.fully_async_policy.message_queue import MessageQueue, MessageQueueClient
+from recipe.fully_async_policy.code_gym.communicator.client import CodeGymClient
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 from verl.trainer.ppo.utils import Role
 from verl.utils.fs import copy_to_local
@@ -172,6 +173,8 @@ class FullyAsyncTaskRunner:
         self._create_trainer(config)
 
         #TODO(P0)-hjl: create Euler-gym - the Sandbox
+        print("[ASYNC MAIN] Initializing CodeGym client...")
+        self.components["codegym_client"] = CodeGymClient()
 
         # sync total_train_steps between rollouter and trainer
         total_train_steps = ray.get(self.components["rollouter"].get_total_train_steps.remote())
@@ -215,6 +218,7 @@ class FullyAsyncTaskRunner:
         rollouter = FullyAsyncRollouter.remote(
             config=config,
             tokenizer=self.components["tokenizer"],
+            codegym_client=self.components["codegym_client"],
             role_worker_mapping={Role.Rollout: self.components["role_worker_mapping"][Role.Rollout]},
             resource_pool_manager=create_resource_pool_manager(config, roles=[Role.Rollout]),
             ray_worker_group_cls=self.components["ray_worker_group_cls"],

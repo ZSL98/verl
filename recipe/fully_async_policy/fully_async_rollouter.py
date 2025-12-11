@@ -49,6 +49,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         self,
         config,
         tokenizer,
+        codegym_client,
         role_worker_mapping: dict[Role, WorkerType],
         resource_pool_manager: ResourcePoolManager,
         ray_worker_group_cls: RayWorkerGroup = RayWorkerGroup,
@@ -59,6 +60,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
     ):
         # Store the tokenizer for text processing
         self.tokenizer = tokenizer
+        self.codegym_client = codegym_client
         self.processor = processor
         self.config = config
         self.reward_fn = load_reward_manager(
@@ -226,6 +228,16 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
     def get_total_train_steps(self):
         return self.total_train_steps
 
+    class GymState:
+        
+    
+    def _state_switch(self, version: int):
+        stop_resp = self.codegym_client.stop_all_processes()
+        assert stop_resp.get("code") == 200, "运行停止失败"
+        workload_info = self.codegym_client.start_random_workload()
+        profiling_result = self.codegym_client.fetch_baseline_sample()
+        return workload_info, profiling_result
+
     async def update_param_version(self, version: int, validate: bool = False, global_steps: int = 0):
         """Update current parameter version"""
         async with self.lock:
@@ -236,6 +248,8 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             #                           then returns the profiling result (cpu util, ops) 
             #                           and selected benchmarks as strings
             #TODO(P0)-hjl rl: Store the profiling_result and corun_benchmarks into a dict (self.gym_state)
+            self.gym_state = self._state_switch(version)
+            
             old_version = self.current_param_version
             self.current_param_version = version
             # every time param change, reset staleness_samples
