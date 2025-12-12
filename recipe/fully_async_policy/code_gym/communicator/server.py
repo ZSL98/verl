@@ -7,6 +7,7 @@ import time
 import re
 import random
 import os
+import json
 from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Optional, Any
@@ -180,6 +181,7 @@ def execute_shell_command(cmd_parts: List[str], timeout: int = 10) -> Dict[str, 
 
 def collect_baseline_sample() -> Dict[str, Any]:
     """采集当前机器的初始ps/lscpu/perf状态"""
+    realtime_snapshot = get_realtime_stats_snapshot()
     return {
         "ps_ef": execute_shell_command(["ps", "-ef"], timeout=5),
         "lscpu": execute_shell_command(["lscpu"], timeout=5),
@@ -187,7 +189,11 @@ def collect_baseline_sample() -> Dict[str, Any]:
             ["perf", "stat", "sleep", "0.5"],
             timeout=6
         ),
-        "realtime_stats": get_realtime_stats_snapshot()
+        "realtime_stats": {
+            "exit_code": 0,
+            "stdout": json.dumps(realtime_snapshot, ensure_ascii=False, indent=2),
+            "stderr": "",
+        },
     }
 
 def _is_intensive_command(tokens: List[str]) -> bool:
@@ -560,7 +566,12 @@ def sample_process_state(pid: int) -> Dict[str, Any]:
     samples["ps_ef"] = execute_shell_command(["ps", "-ef"], timeout=5)
     samples["lscpu"] = execute_shell_command(["lscpu"], timeout=5)
     samples["perf_stat"] = execute_shell_command(["perf", "stat", "sleep", "0.5"], timeout=6)
-    samples["realtime_stats"] = get_realtime_stats_snapshot()
+    realtime_snapshot = get_realtime_stats_snapshot()
+    samples["realtime_stats"] = {
+        "exit_code": 0,
+        "stdout": json.dumps(realtime_snapshot, ensure_ascii=False, indent=2),
+        "stderr": "",
+    }
     return samples
 
 
