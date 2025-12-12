@@ -60,6 +60,16 @@ DISK_FILE_SIZE_MB = 1024
 DISK_BLOCK_SIZE_KB = 8
 DISK_SEQUENTIAL = 0
 DISK_READ_ONLY = 0
+LOAD_OUTPUT_PATTERN = re.compile(
+    r"""
+    \[\s*(?P<load_name>[^\|\]]+?)\s*\|\s*(?P<elapsed>[0-9]+(?:\.[0-9]+)?)s\]\s*
+    Threads:\s*(?P<threads>\d+)\s*\|\s*
+    Ops:\s*(?P<ops>[0-9]+(?:\.[0-9]+)?)M\s*\|\s*
+    CPU\s+Usage\(est\):\s*(?P<cpu>[0-9]+(?:\.[0-9]+)?)%\s*\|\s*
+    Load\s+Factor:\s*(?P<load_factor>[0-9]+(?:\.[0-9]+)?)
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 
 # ======================== 数据结构定义 ========================
 @dataclass
@@ -220,6 +230,24 @@ def _format_command(command_args: Any) -> str:
     if isinstance(command_args, (list, tuple)):
         return shlex.join([str(arg) for arg in command_args])
     return str(command_args)
+
+
+def _parse_load_output(line: str) -> Optional[Dict[str, Any]]:
+    """解析 load_common.h 中实时输出的统计行"""
+    match = LOAD_OUTPUT_PATTERN.search(line)
+    if not match:
+        return None
+    try:
+        return {
+            "load_name": match.group("load_name").strip(),
+            "elapsed_sec": float(match.group("elapsed")),
+            "threads": int(match.group("threads")),
+            "ops_million": float(match.group("ops")),
+            "cpu_usage_pct": float(match.group("cpu")),
+            "load_factor": float(match.group("load_factor")),
+        }
+    except Exception:
+        return None
 
 
 def unregister_tracked_process(pid: int) -> None:
@@ -499,17 +527,22 @@ def trigger_random_workload_async(source: str = "manual") -> List[int]:
 
 
 def get_realtime_stats_snapshot() -> Dict[str, Any]:
-    """获取当前被跟踪进程的最新实时输出，包含来源和命令"""
+    """获取当前被跟踪进程的最新实时输出，解析 load_common.h 打印的指标"""
     cleanup_finished_processes()
     snapshot: Dict[str, Any] = {}
     with process_registry_lock, process_output_lock:
         for pid, tracked in tracked_processes.items():
-            snapshot[str(pid)] = {
+            raw_line = process_last_output.get(pid, "")
+            parsed = _parse_load_output(raw_line) if raw_line else None
+            entry: Dict[str, Any] = {
                 "pid": pid,
                 "command": tracked.command,
                 "source": tracked.source,
-                "last_output": process_last_output.get(pid, "")
+                "last_output": raw_line,
             }
+            if parsed:
+                entry.update(parsed)
+            snapshot[str(pid)] = entry
     return snapshot
 
 def sample_process_state(pid: int) -> Dict[str, Any]:
