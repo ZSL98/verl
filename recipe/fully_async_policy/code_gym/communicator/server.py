@@ -523,7 +523,8 @@ def sample_process_state(pid: int) -> Dict[str, Any]:
     samples["ps_ef"] = execute_shell_command(["ps", "-ef"], timeout=5)
     samples["lscpu"] = execute_shell_command(["lscpu"], timeout=5)
     samples["perf_stat"] = execute_shell_command(["perf", "stat", "sleep", "0.5"], timeout=6)
-    samples["benchmark_latest"] = collect_latest_benchmark_samples([pid])
+    # 返回所有负载进程的最新采样日志，而非仅目标PID
+    samples["benchmark_latest"] = collect_latest_benchmark_samples()
     return samples
 
 
@@ -587,7 +588,8 @@ def run_single_bind_command(command_str: str) -> BindCommandResult:
             result.sample_results = {
                 "ps_ef": {"exit_code": -1, "stdout": "", "stderr": "目标进程已退出，无法采样"},
                 "lscpu": execute_shell_command(["lscpu"], timeout=5),
-                "perf_stat": {"exit_code": -1, "stdout": "", "stderr": "目标进程已退出，无法采样"}
+                "perf_stat": {"exit_code": -1, "stdout": "", "stderr": "目标进程已退出，无法采样"},
+                "benchmark_latest": collect_latest_benchmark_samples(),
             }
 
         result.exit_code = proc.returncode if proc else -1
