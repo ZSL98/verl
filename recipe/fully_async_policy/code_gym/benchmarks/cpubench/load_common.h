@@ -11,10 +11,6 @@
 #include <algorithm>
 #include <numeric>
 #include <iomanip>
-#include <fstream>
-#include <filesystem>
-#include <sstream>
-#include <cstdlib>
 #include <getopt.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -48,28 +44,6 @@ struct BaseStats {
 // 线程局部随机数生成器
 thread_local mt19937 rng(random_device{}());
 
-inline std::filesystem::path get_codegym_sample_dir() {
-    const char* env_dir = std::getenv("CODEGYM_SAMPLE_DIR");
-    if (env_dir && *env_dir) {
-        return std::filesystem::path(env_dir);
-    }
-    return std::filesystem::temp_directory_path() / "codegym_samples";
-}
-
-inline std::filesystem::path get_codegym_sample_path() {
-    static std::filesystem::path dir = get_codegym_sample_dir();
-    std::error_code ec;
-    std::filesystem::create_directories(dir, ec);
-    return dir / ("sample_" + std::to_string(getpid()) + ".log");
-}
-
-inline void write_codegym_latest_sample(const std::string& line) {
-    static std::filesystem::path path = get_codegym_sample_path();
-    std::ofstream out(path, std::ios::out | std::ios::trunc);
-    if (!out) return;
-    out << line << std::endl;
-}
-
 inline void atomic_double_add(atomic<double>& target, double value) {
     double expected = target.load(memory_order_relaxed);
     while (!target.compare_exchange_weak(expected, expected + value,
@@ -89,7 +63,7 @@ void load_controller(BaseConfig& config, BaseStats& stats, TaskFunc task_func, T
     // 初始化基础线程
     stats.current_threads = config.base_threads;
     for (int i = 0; i < config.base_threads; ++i) {
-        worker_threads.emplace_back(task_func, 1000, 1.0, forward<TaskArgs>(args)...);
+        worker_threads.emplace_back(task_func, 200, 1.0, forward<TaskArgs>(args)...);
     }
 
     // 动态调整循环
@@ -111,30 +85,26 @@ void load_controller(BaseConfig& config, BaseStats& stats, TaskFunc task_func, T
             }
             // 添加新线程
             while (stats.current_threads < target_threads) {
-                worker_threads.emplace_back(task_func, 1000, current_load, forward<TaskArgs>(args)...);
+                worker_threads.emplace_back(task_func, 200, current_load, forward<TaskArgs>(args)...);
                 stats.current_threads++;
             }
         } else {
             // 固定线程数，调整负载强度
             for (auto& t : worker_threads) {
                 if (t.joinable()) t.join();
-                t = thread(task_func, 1000, current_load, forward<TaskArgs>(args)...);
+                t = thread(task_func, 200, 0, forward<TaskArgs>(args)...);
             }
         }
 
         // 实时输出统计
         lock_guard<mutex> lock(stats.stats_mtx);
         double elapsed = duration_cast<seconds>(high_resolution_clock::now() - start_time).count();
-        std::ostringstream oss;
-        oss << "[" << config.load_name << " | " << fixed << setprecision(1) << elapsed << "s] "
-            << "Threads: " << stats.current_threads << " | "
-            << "Ops: " << stats.total_ops / 1e6 << "M | "
-            << "CPU Usage(est): " << fixed << setprecision(1)
-            << (stats.total_cpu_time / (elapsed * stats.current_threads)) * 100 << "% | "
-            << "Load Factor: " << fixed << setprecision(2) << current_load;
-        const std::string line = oss.str();
-        cout << line << endl;
-        write_codegym_latest_sample(line);
+        cout << "[" << config.load_name << " | " << fixed << setprecision(1) << elapsed << "s] "
+             << "Threads: " << stats.current_threads << " | "
+             << "Ops: " << stats.total_ops / 1e6 << "M | "
+             << "CPU Usage(est): " << fixed << setprecision(1)
+             << (stats.total_cpu_time / (elapsed * stats.current_threads)) * 100 << "% | "
+             << "Load Factor: " << fixed << setprecision(2) << current_load << endl;
     }
 
     // 等待所有线程结束
