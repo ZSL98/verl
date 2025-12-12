@@ -7,7 +7,6 @@ import time
 import re
 import random
 import os
-import json
 from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Optional, Any
@@ -33,9 +32,6 @@ completed_results: Dict[str, Any] = {}
 processing_requests = set()
 process_registry_lock = threading.Lock()
 tracked_processes: Dict[int, "TrackedProcess"] = {}
-process_output_lock = threading.Lock()
-process_last_output: Dict[int, str] = {}
-process_last_metrics: Dict[int, Dict[str, Any]] = {}
 
 # 4. NUMA/CPU合法性校验正则
 NUMA_NODE_PATTERN = re.compile(r"^\d+$")  # 数字格式的NUMA节点
@@ -62,16 +58,6 @@ DISK_FILE_SIZE_MB = 1024
 DISK_BLOCK_SIZE_KB = 8
 DISK_SEQUENTIAL = 0
 DISK_READ_ONLY = 0
-LOAD_OUTPUT_PATTERN = re.compile(
-    r"""
-    \[\s*(?P<load_name>[^\|\]]+?)\s*\|\s*(?P<elapsed>[0-9]+(?:\.[0-9]+)?)s\]\s*
-    Threads:\s*(?P<threads>\d+)\s*\|\s*
-    Ops:\s*(?P<ops>[0-9]+(?:\.[0-9]+)?)M\s*\|\s*
-    CPU\s+Usage\(est\):\s*(?P<cpu>[0-9]+(?:\.[0-9]+)?)%\s*\|\s*
-    Load\s+Factor:\s*(?P<load_factor>[0-9]+(?:\.[0-9]+)?)
-    """,
-    re.IGNORECASE | re.VERBOSE,
-)
 
 # ======================== 数据结构定义 ========================
 @dataclass
@@ -181,7 +167,6 @@ def execute_shell_command(cmd_parts: List[str], timeout: int = 10) -> Dict[str, 
 
 def collect_baseline_sample() -> Dict[str, Any]:
     """采集当前机器的初始ps/lscpu/perf状态"""
-    realtime_snapshot = get_realtime_stats_snapshot()
     return {
         "ps_ef": execute_shell_command(["ps", "-ef"], timeout=5),
         "lscpu": execute_shell_command(["lscpu"], timeout=5),
@@ -189,11 +174,6 @@ def collect_baseline_sample() -> Dict[str, Any]:
             ["perf", "stat", "sleep", "0.5"],
             timeout=6
         ),
-        "realtime_stats": {
-            "exit_code": 0,
-            "stdout": json.dumps(realtime_snapshot, ensure_ascii=False, indent=2),
-            "stderr": "",
-        },
     }
 
 def _is_intensive_command(tokens: List[str]) -> bool:
@@ -239,34 +219,14 @@ def _format_command(command_args: Any) -> str:
     return str(command_args)
 
 
-def _parse_load_output(line: str) -> Optional[Dict[str, Any]]:
-    """解析 load_common.h 中实时输出的统计行"""
-    match = LOAD_OUTPUT_PATTERN.search(line)
-    if not match:
-        return None
-    try:
-        return {
-            "load_name": match.group("load_name").strip(),
-            "elapsed_sec": float(match.group("elapsed")),
-            "threads": int(match.group("threads")),
-            "ops_million": float(match.group("ops")),
-            "cpu_usage_pct": float(match.group("cpu")),
-            "load_factor": float(match.group("load_factor")),
-        }
-    except Exception:
-        return None
-
-
 def unregister_tracked_process(pid: int) -> None:
     """从全局跟踪表中移除指定PID"""
     with process_registry_lock:
         tracked_processes.pop(pid, None)
-    with process_output_lock:
-        process_last_output.pop(pid, None)
 
 
-def register_tracked_process(proc: subprocess.Popen, source: str, capture_output: bool = False) -> None:
-    """记录由server启动的进程，并在退出后自动清理，可选捕获实时输出"""
+def register_tracked_process(proc: subprocess.Popen, source: str) -> None:
+    """记录由server启动的进程，并在退出后自动清理"""
     cmd_str = _format_command(proc.args)
     with process_registry_lock:
         tracked_processes[proc.pid] = TrackedProcess(
@@ -275,24 +235,6 @@ def register_tracked_process(proc: subprocess.Popen, source: str, capture_output
             source=source,
             start_time=time.time()
         )
-
-    if capture_output and proc.stdout:
-        def _read_output() -> None:
-            try:
-                for line in proc.stdout:
-                    with process_output_lock:
-                        process_last_output[proc.pid] = line.rstrip("\n")
-                        parsed = _parse_load_output(process_last_output[proc.pid])
-                        if parsed:
-                            process_last_metrics[proc.pid] = parsed
-            except Exception:
-                pass
-            finally:
-                with process_output_lock:
-                    process_last_output.pop(proc.pid, None)
-                    process_last_metrics.pop(proc.pid, None)
-
-        threading.Thread(target=_read_output, daemon=True, name=f"proc-output-{proc.pid}").start()
 
     def _auto_cleanup() -> None:
         try:
@@ -311,10 +253,6 @@ def cleanup_finished_processes() -> None:
         finished = [pid for pid, tracked in tracked_processes.items() if tracked.proc.poll() is not None]
         for pid in finished:
             tracked_processes.pop(pid, None)
-    with process_output_lock:
-        for pid in finished:
-            process_last_output.pop(pid, None)
-            process_last_metrics.pop(pid, None)
 
 
 def stop_all_tracked_processes(timeout: float = 5.0) -> Dict[str, Any]:
@@ -454,14 +392,12 @@ def start_load_instances(load_counts: Dict[str, int]) -> List[tuple]:
                 cmd = build_load_command(load_name)
                 proc = subprocess.Popen(
                     cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                     close_fds=True,
                     cwd=str(BENCHMARK_DIR)
                 )
-                register_tracked_process(proc, source=f"benchmark:{load_name}[{idx}]", capture_output=True)
+                register_tracked_process(proc, source=f"benchmark:{load_name}[{idx}]")
                 processes.append((load_name, idx, proc))
                 print(f"    ✅ 已启动 {load_name}[{idx}] (PID: {proc.pid})")
             except Exception as e:
@@ -539,25 +475,6 @@ def trigger_random_workload_async(source: str = "manual") -> List[int]:
         return []
 
 
-def get_realtime_stats_snapshot() -> Dict[str, Any]:
-    """获取当前被跟踪进程的最新实时输出，解析 load_common.h 打印的指标"""
-    cleanup_finished_processes()
-    snapshot: Dict[str, Any] = {}
-    with process_registry_lock, process_output_lock:
-        for pid, tracked in tracked_processes.items():
-            raw_line = process_last_output.get(pid, "")
-            parsed = process_last_metrics.get(pid) or (_parse_load_output(raw_line) if raw_line else None)
-            entry: Dict[str, Any] = {
-                "pid": pid,
-                "command": tracked.command,
-                "source": tracked.source,
-                "last_output": raw_line,
-            }
-            if parsed:
-                entry.update(parsed)
-            snapshot[str(pid)] = entry
-    return snapshot
-
 def sample_process_state(pid: int) -> Dict[str, Any]:
     """采集指定进程的ps/lscpu/perf信息"""
     samples: Dict[str, Any] = {}
@@ -566,12 +483,6 @@ def sample_process_state(pid: int) -> Dict[str, Any]:
     samples["ps_ef"] = execute_shell_command(["ps", "-ef"], timeout=5)
     samples["lscpu"] = execute_shell_command(["lscpu"], timeout=5)
     samples["perf_stat"] = execute_shell_command(["perf", "stat", "sleep", "0.5"], timeout=6)
-    realtime_snapshot = get_realtime_stats_snapshot()
-    samples["realtime_stats"] = {
-        "exit_code": 0,
-        "stdout": json.dumps(realtime_snapshot, ensure_ascii=False, indent=2),
-        "stderr": "",
-    }
     return samples
 
 

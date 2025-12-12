@@ -245,7 +245,6 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             profiling_data.get("ps_ef"),
             profiling_data.get("lscpu"),
             profiling_data.get("perf_stat"),
-            profiling_data.get("realtime_stats"),
         )
 
     async def update_param_version(self, version: int, validate: bool = False, global_steps: int = 0):
@@ -258,7 +257,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             #                           then returns the profiling result (cpu util, ops) 
             #                           and selected benchmarks as strings
             #TODO(P0)-hjl rl: Store the profiling_result and corun_benchmarks into a dict (self.gym_state)
-            self.pid_msg, self.ps_result, self.lscpu_result, self.perf_result, self.runtime_result = self._state_switch(version)
+            self.pid_msg, self.ps_result, self.lscpu_result, self.perf_result = self._state_switch(version)
             
             old_version = self.current_param_version
             self.current_param_version = version
