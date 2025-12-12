@@ -159,9 +159,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     def _init_async_rollout_manager(self):
         pass
 
-    def _validate(self):
+    # def _validate(self):
         #TODO(P0)-zsl: check if we need to overwrite the _validate function, notify the remote sandbox with slice id
-        pass
+        # pass
 
     def fit(self):
         """

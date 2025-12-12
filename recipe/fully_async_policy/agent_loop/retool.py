@@ -90,7 +90,7 @@ class CustomRLHFDataset(RLHFDataset):
             ],
             "ability": "ADAPTER",
             "reward_model": {"ground_truth": 0},
-            "agent_name": "agent_to_adjust_resource_allocation"
+            "agent_name": "async_partial_tool_agent"
         }
         self.dataframe = datasets.Dataset.from_dict({
             k: [v] for k, v in single_data.items()

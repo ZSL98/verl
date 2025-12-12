@@ -52,19 +52,19 @@ try:
 except ImportError:
     pass
 
-try:
-    from vllm.model_executor.models.qwen3_next import Qwen3NextForCausalLM
+# try:
+#     from vllm.model_executor.models.qwen3_next import Qwen3NextForCausalLM
 
-    SUPPORTED_MOE_MODELS.append(Qwen3NextForCausalLM)
-except ImportError:
-    pass
+#     SUPPORTED_MOE_MODELS.append(Qwen3NextForCausalLM)
+# except ImportError:
+#     pass
 
-try:
-    from vllm.model_executor.models.kimi_vl import KimiVLForConditionalGeneration
+# try:
+#     from vllm.model_executor.models.kimi_vl import KimiVLForConditionalGeneration
 
-    SUPPORTED_MOE_MODELS.append(KimiVLForConditionalGeneration)
-except ImportError:
-    pass
+#     SUPPORTED_MOE_MODELS.append(KimiVLForConditionalGeneration)
+# except ImportError:
+#     pass
 
 
 def patch_vllm_moe_model_weight_loader(model):

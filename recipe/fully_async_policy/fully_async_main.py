@@ -171,7 +171,7 @@ class FullyAsyncTaskRunner:
         print("[ASYNC MAIN] Creating FullyAsyncTrainer...")
         self._create_trainer(config)
 
-        #TODO(P0)-hjl: create Euler-gym - the Sandbox
+        #TODO(P1)-hjl: create Euler-gym - the Sandbox
 
         # sync total_train_steps between rollouter and trainer
         total_train_steps = ray.get(self.components["rollouter"].get_total_train_steps.remote())

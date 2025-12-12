@@ -146,6 +146,7 @@ python -m recipe.fully_async_policy.fully_async_main \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
     trainer.val_before_train=True \
+    trainer.val_only=True \
     trainer.save_freq=5 \
     +trainer.save_method="rank0" \
     trainer.default_local_dir="${CKPTS_DIR}" \

@@ -411,7 +411,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         for epoch, batch_dict in continuous_iterator:
             # Similar to _prepare_generate_batch: Separate data
             full_batch = prepare_single_generation_data(batch_dict, self.config)
-            #TODO(P0): The raw prompt is inside full_batch, attach the contents in self.gym_state:dict onto the raw prompt
+            #TODO(P0)-hjl: The raw prompt is inside full_batch, attach the contents in self.gym_state:dict onto the raw prompt
 
             sample_id = f"sample_{epoch}_{self.global_steps}"
 

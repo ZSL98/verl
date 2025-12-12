@@ -91,11 +91,6 @@ class RLHFDataset(Dataset):
         processor: Optional[ProcessorMixin] = None,
         max_samples: int = -1,
     ):
-        #TODO(P1): skip_load_from_files should be in the config
-        skip_load_from_files = True
-        if skip_load_from_files:
-            self._read_files_and_tokenize()
-            return
 
         if not isinstance(data_files, list | ListConfig):
             data_files = [data_files]
@@ -145,6 +140,12 @@ class RLHFDataset(Dataset):
         self.shuffle = config.get("shuffle", False)
         self.seed = config.get("seed")
 
+        #TODO(P1): skip_load_from_files should be in the config
+        skip_load_from_files = True
+        if skip_load_from_files:
+            self._read_files_and_tokenize()
+            return
+
         self._download()
         self._read_files_and_tokenize()
 
@@ -157,11 +158,21 @@ class RLHFDataset(Dataset):
 
     def _read_files_and_tokenize(self):
         dataframes = []
+        """
         for parquet_file in self.data_files:
             # read parquet files and cache
             dataframe = datasets.load_dataset("parquet", data_files=parquet_file)["train"]
             dataframes.append(dataframe)
         self.dataframe: datasets.Dataset = datasets.concatenate_datasets(dataframes)
+        """
+        # self.max_samples = -1
+        # self.filter_overlong_prompts = False
+        # self.prompt_key = "prompt"
+        # self.image_key = "images"
+        # self.video_key = "videos"
+        self.dataframe = datasets.Dataset.from_dict({
+            "prompt": ["Hello world"]
+        })
 
         total = len(self.dataframe)
         print(f"dataset len: {len(self.dataframe)}")
