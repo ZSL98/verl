@@ -124,6 +124,7 @@ void load_controller(BaseConfig& config, BaseStats& stats, TaskFunc task_func, T
 
         // 实时输出统计
         std::ostringstream oss;
+        double elapsed = duration_cast<seconds>(high_resolution_clock::now() - start_time).count();
         oss << "[" << config.load_name << " | " << fixed << setprecision(1) << elapsed << "s] "
             << "Threads: " << stats.current_threads << " | "
             << "Ops: " << stats.total_ops / 1e6 << "M | "
