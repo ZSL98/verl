@@ -34,6 +34,7 @@ process_registry_lock = threading.Lock()
 tracked_processes: Dict[int, "TrackedProcess"] = {}
 process_output_lock = threading.Lock()
 process_last_output: Dict[int, str] = {}
+process_last_metrics: Dict[int, Dict[str, Any]] = {}
 
 # 4. NUMA/CPU合法性校验正则
 NUMA_NODE_PATTERN = re.compile(r"^\d+$")  # 数字格式的NUMA节点
@@ -41,7 +42,7 @@ CPU_LIST_PATTERN = re.compile(r"^\d+(,\d+)*(-\d+)*$")  # 支持1,2,3 或 0-7格�
 BENCHMARK_DIR = Path(__file__).resolve().parent.parent / "benchmarks"
 BENCHMARK_BIN_DIR = BENCHMARK_DIR / "cpubench"
 DISK_TEST_FILE = BENCHMARK_DIR / "disk_test.tmp"
-TEST_DURATION = 60
+TEST_DURATION = 600
 LOAD_COUNT_RANGE: Dict[str, tuple] = {
     "compute": (1, 5),
     "mem": (1, 8),
@@ -275,11 +276,15 @@ def register_tracked_process(proc: subprocess.Popen, source: str, capture_output
                 for line in proc.stdout:
                     with process_output_lock:
                         process_last_output[proc.pid] = line.rstrip("\n")
+                        parsed = _parse_load_output(process_last_output[proc.pid])
+                        if parsed:
+                            process_last_metrics[proc.pid] = parsed
             except Exception:
                 pass
             finally:
                 with process_output_lock:
                     process_last_output.pop(proc.pid, None)
+                    process_last_metrics.pop(proc.pid, None)
 
         threading.Thread(target=_read_output, daemon=True, name=f"proc-output-{proc.pid}").start()
 
@@ -303,6 +308,7 @@ def cleanup_finished_processes() -> None:
     with process_output_lock:
         for pid in finished:
             process_last_output.pop(pid, None)
+            process_last_metrics.pop(pid, None)
 
 
 def stop_all_tracked_processes(timeout: float = 5.0) -> Dict[str, Any]:
@@ -445,6 +451,7 @@ def start_load_instances(load_counts: Dict[str, int]) -> List[tuple]:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
+                    bufsize=1,
                     close_fds=True,
                     cwd=str(BENCHMARK_DIR)
                 )
@@ -533,7 +540,7 @@ def get_realtime_stats_snapshot() -> Dict[str, Any]:
     with process_registry_lock, process_output_lock:
         for pid, tracked in tracked_processes.items():
             raw_line = process_last_output.get(pid, "")
-            parsed = _parse_load_output(raw_line) if raw_line else None
+            parsed = process_last_metrics.get(pid) or (_parse_load_output(raw_line) if raw_line else None)
             entry: Dict[str, Any] = {
                 "pid": pid,
                 "command": tracked.command,

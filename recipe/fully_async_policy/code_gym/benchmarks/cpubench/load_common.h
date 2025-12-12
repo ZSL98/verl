@@ -50,9 +50,16 @@ inline void atomic_double_add(atomic<double>& target, double value) {
                                          memory_order_relaxed, memory_order_relaxed)) {}
 }
 
+inline void enable_line_buffered_output() {
+    ios::sync_with_stdio(false);
+    cout.setf(ios::unitbuf);  // flush on every insertion
+}
+
 // 负载控制器基础逻辑（动态调整线程数和负载强度）
 template <typename TaskFunc, typename... TaskArgs>
 void load_controller(BaseConfig& config, BaseStats& stats, TaskFunc task_func, TaskArgs&&... args) {
+    enable_line_buffered_output();
+
     uniform_int_distribution<> thread_dist(config.base_threads, config.max_threads);
     uniform_real_distribution<> load_dist(0.3, 1.0);
     uniform_int_distribution<> fluct_dist(0, config.load_fluctuation);
