@@ -11,6 +11,10 @@
 #include <algorithm>
 #include <numeric>
 #include <iomanip>
+#include <fstream>
+#include <filesystem>
+#include <sstream>
+#include <cstdlib>
 #include <getopt.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -43,6 +47,28 @@ struct BaseStats {
 
 // 线程局部随机数生成器
 thread_local mt19937 rng(random_device{}());
+
+inline std::filesystem::path get_codegym_sample_dir() {
+    const char* env_dir = std::getenv("CODEGYM_SAMPLE_DIR");
+    if (env_dir && *env_dir) {
+        return std::filesystem::path(env_dir);
+    }
+    return std::filesystem::temp_directory_path() / "codegym_samples";
+}
+
+inline std::filesystem::path get_codegym_sample_path() {
+    static std::filesystem::path dir = get_codegym_sample_dir();
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    return dir / ("sample_" + std::to_string(getpid()) + ".log");
+}
+
+inline void write_codegym_latest_sample(const std::string& line) {
+    static std::filesystem::path path = get_codegym_sample_path();
+    std::ofstream out(path, std::ios::out | std::ios::trunc);
+    if (!out) return;
+    out << line << std::endl;
+}
 
 inline void atomic_double_add(atomic<double>& target, double value) {
     double expected = target.load(memory_order_relaxed);
@@ -97,14 +123,16 @@ void load_controller(BaseConfig& config, BaseStats& stats, TaskFunc task_func, T
         }
 
         // 实时输出统计
-        lock_guard<mutex> lock(stats.stats_mtx);
-        double elapsed = duration_cast<seconds>(high_resolution_clock::now() - start_time).count();
-        cout << "[" << config.load_name << " | " << fixed << setprecision(1) << elapsed << "s] "
-             << "Threads: " << stats.current_threads << " | "
-             << "Ops: " << stats.total_ops / 1e6 << "M | "
-             << "CPU Usage(est): " << fixed << setprecision(1)
-             << (stats.total_cpu_time / (elapsed * stats.current_threads)) * 100 << "% | "
-             << "Load Factor: " << fixed << setprecision(2) << current_load << endl;
+        std::ostringstream oss;
+        oss << "[" << config.load_name << " | " << fixed << setprecision(1) << elapsed << "s] "
+            << "Threads: " << stats.current_threads << " | "
+            << "Ops: " << stats.total_ops / 1e6 << "M | "
+            << "CPU Usage(est): " << fixed << setprecision(1)
+            << (stats.total_cpu_time / (elapsed * stats.current_threads)) * 100 << "% | "
+            << "Load Factor: " << fixed << setprecision(2) << current_load;
+        const std::string line = oss.str();
+        cout << line << endl;
+        write_codegym_latest_sample(line);
     }
 
     // 等待所有线程结束
