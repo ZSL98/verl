@@ -228,15 +228,25 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
     def get_total_train_steps(self):
         return self.total_train_steps
 
-    class GymState:
-        
-    
     def _state_switch(self, version: int):
         stop_resp = self.codegym_client.stop_all_processes()
-        assert stop_resp.get("code") == 200, "运行停止失败"
+        assert stop_resp.get("code") == 200, f"stop processes failed: {stop_resp}"
+
         workload_info = self.codegym_client.start_random_workload()
+        assert workload_info.get("code") == 200, f"start baseline failed: {workload_info}"
+        pid_msg = workload_info.get("msg", "")
+
         profiling_result = self.codegym_client.fetch_baseline_sample()
-        return workload_info, profiling_result
+        assert profiling_result.get("code") == 200, f"profile baseline failed: {profiling_result}"
+        profiling_data = profiling_result.get("data", {}) or {}
+
+        return (
+            pid_msg,
+            profiling_data.get("ps_ef"),
+            profiling_data.get("lscpu"),
+            profiling_data.get("perf_stat"),
+            profiling_data.get("realtime_stats"),
+        )
 
     async def update_param_version(self, version: int, validate: bool = False, global_steps: int = 0):
         """Update current parameter version"""
@@ -248,7 +258,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             #                           then returns the profiling result (cpu util, ops) 
             #                           and selected benchmarks as strings
             #TODO(P0)-hjl rl: Store the profiling_result and corun_benchmarks into a dict (self.gym_state)
-            self.gym_state = self._state_switch(version)
+            self.pid_msg, self.ps_result, self.lscpu_result, self.perf_result, self.runtime_result = self._state_switch(version)
             
             old_version = self.current_param_version
             self.current_param_version = version
