@@ -21,45 +21,111 @@ from typing import Any
 
 import datasets
 
-from verl.tools.base_tool import OpenAIFunctionToolSchema
+from verl.tools.base_tool import OpenAIFunctionToolSchema, ToolResponse
 from verl.tools.sandbox_fusion_tools import SandboxFusionTool
 from verl.utils.dataset import RLHFDataset
 from verl.utils.reward_score import math_dapo
 from verl.utils.rollout_trace import rollout_trace_op
 
+from typing import Any, Optional
+from uuid import uuid4
+import aiohttp
 logger = logging.getLogger(__name__)
 
 #TODO(P0)-hjl: adapt the code below
 class CustomSandboxFusionTool(SandboxFusionTool):
     def __init__(self, config: dict, tool_schema: OpenAIFunctionToolSchema):
         super().__init__(config, tool_schema)
-        self.code_pattern = re.compile(r"```python(.*?)```", re.DOTALL)
+        #self.code_pattern = re.compile(r"```python(.*?)```", re.DOTALL)
+        self.target_url = config.get("target_url")
+        if not self.target_url:
+            raise ValueError("Config must contain 'target_url' for CustomSandboxFusionTool")
+        self._instance_dict = {}
 
+    async def create(
+        self, instance_id: Optional[str] = None, ground_truth: Optional[str] = None, **kwargs
+    ) -> tuple[str, ToolResponse]:
+        if instance_id is None:
+            instance_id = str(uuid4())
+        
+        # 从 kwargs 中获取 create_kwargs
+        create_kwargs = kwargs.get("create_kwargs", {})
+        
+        # 提取 request_id（如果有的话）
+        request_id = create_kwargs.get("request_id", None)
+        ground_truth = ground_truth or create_kwargs.get("ground_truth", None)
+
+        # 保存到实例字典中
+        self._instance_dict[instance_id] = {
+            "response": "",
+            "ground_truth": ground_truth,
+            "reward": 0.0,
+            "request_id": request_id,  # 保存 request_id
+        }
+
+        logger.info(f"Created tool instance {instance_id} for request_id={request_id}")
+        return instance_id, ToolResponse()
+
+    #接口是去request_id(uuid4),command(str)。(回运行状态(dict(str)与之前返回的运行状态相同))
     @rollout_trace_op
     async def execute(self, instance_id: str, parameters: dict[str, Any], **kwargs) -> tuple[str, float, dict]:
-        code = parameters["code"]
-        matches = self.code_pattern.findall(code)
-        if matches:
-            code = matches[0].strip()
 
-        # NOTE: some script may not explicitly print result, we need to add a print statement to the end of the script
-        lines = code.split("\n")
-        for i, line in reversed(list(enumerate(lines))):
-            if line == "":
-                continue
-            if not lines[i].startswith("print"):
-                lines[i] = f"print({line})"
-            break
-        code = "\n".join(lines)
+        command = parameters.get("command")
+        if not isinstance(command, str):
+            command = str(command)
+        
+        state = self._instance_dict[instance_id]
+        request_id = state.get("request_id")
+        if request_id is None:
+            logger.warning("request_id not found in instance state. Using instance_id as fallback.")
+            request_id = instance_id
 
-        timeout = parameters.get("timeout", self.default_timeout)
-        language = parameters.get("language", self.default_language)
-        if not isinstance(code, str):
-            code = str(code)
+        # # 构造请求 payload
+        # payload = {
+        #     "request_id": request_id,
+        #     "command": command,
+        # }
 
-        result = await self.execution_pool.execute.remote(self.execute_code, instance_id, code, timeout, language)
-        # sandbox has no score or metrics, use Nones
-        return result, None, None
+        # try:
+        #     # 使用 httpx 异步发送 POST 请求
+        #     async with httpx.AsyncClient(timeout=30.0) as client:
+        #         response = await client.post(self.target_url, json=payload)
+        #         response.raise_for_status()
+        #         result_text = response.text
+        #         status_code = response.status_code
+        # except Exception as e:
+        #     error_msg = f"HTTP request failed: {e}"
+        #     logger.error(error_msg)
+        #     result_text = error_msg
+        #     status_code = 500
+        result_text = ""
+        tool_response = ToolResponse(text=result_text)
+        reward = 0.0
+
+        return tool_response, reward, None
+        #code = parameters["code"]
+        # matches = self.code_pattern.findall(code)
+        # if matches:
+        #     code = matches[0].strip()
+
+        # # NOTE: some script may not explicitly print result, we need to add a print statement to the end of the script
+        # lines = code.split("\n")
+        # for i, line in reversed(list(enumerate(lines))):
+        #     if line == "":
+        #         continue
+        #     if not lines[i].startswith("print"):
+        #         lines[i] = f"print({line})"
+        #     break
+        # code = "\n".join(lines)
+
+        # timeout = parameters.get("timeout", self.default_timeout)
+        # language = parameters.get("language", self.default_language)
+        # if not isinstance(code, str):
+        #     code = str(code)
+
+        # result = await self.execution_pool.execute.remote(self.execute_code, instance_id, code, timeout, language)
+        # # sandbox has no score or metrics, use Nones
+        # return result, None, None
 
 
 answer_format = """\nThe answer format must be: \\boxed{'The final answer goes here.'}"""

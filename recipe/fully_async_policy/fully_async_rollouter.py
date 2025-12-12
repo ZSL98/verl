@@ -176,6 +176,12 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         self.active_tasks = set()
         self.cancel_queue = asyncio.Queue()
 
+        # For gym state tracking
+        self.gym_state: dict = {
+            "profiling_result": "",
+            "corun_benchmarks": "",
+        }
+
     def _init_async_objects(self):
         # Initialize asyncio synchronization primitives.
         # We let asyncio.Condition create the Lock internally to ensure they share the same Event Loop.
@@ -236,6 +242,11 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             #                           then returns the profiling result (cpu util, ops) 
             #                           and selected benchmarks as strings
             #TODO(P0)-hjl rl: Store the profiling_result and corun_benchmarks into a dict (self.gym_state)
+            #接口：查询banchmark的状态 profiling_result=[lscpu,ps,perf] corun_benchmarks=[?]
+            profiling_result = ""
+            corun_benchmarks = ""
+            self.gym_state["profiling_result"] = profiling_result
+            self.gym_state["corun_benchmarks"] = corun_benchmarks
             old_version = self.current_param_version
             self.current_param_version = version
             # every time param change, reset staleness_samples
@@ -404,6 +415,20 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             worker_group=self.rollout_wg,
         )
 
+
+    def get_gym_state_string(self) -> str:
+        pr = self.gym_state.get("profiling_result", "").strip()
+        cb = self.gym_state.get("corun_benchmarks", "").strip()
+        if not pr and not cb:
+            return ""
+        parts = []
+        if pr:
+            parts.append(f"Profiling: {pr}")
+        if cb:
+            parts.append(f"Benchmarks: {cb}")
+        return f"[GymState] {'; '.join(parts)}. "
+
+
     # Add samples to the pending_queue
     async def _feed_samples(self):
         continuous_iterator = self._create_continuous_iterator()
@@ -412,6 +437,28 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             # Similar to _prepare_generate_batch: Separate data
             full_batch = prepare_single_generation_data(batch_dict, self.config)
             #TODO(P0): The raw prompt is inside full_batch, attach the contents in self.gym_state:dict onto the raw prompt
+            
+            
+            gym_str = self.get_gym_state_string()
+            # Example: assuming prompt is in non_tensor_batch['prompt']
+            # Adjust key name according to your actual data structure!
+            raw_prompt_batch = full_batch.non_tensor_batch["raw_prompt"]  # np.ndarray of shape (B,)
+
+            # 确保它是可迭代的 object array
+            #assert isinstance(raw_prompt_batch, np.ndarray), f"Expected np.ndarray, got {type(raw_prompt_batch)}"
+            #assert raw_prompt_batch.dtype == object, "raw_prompt must be object dtype"
+
+            for i in range(len(raw_prompt_batch)):
+                messages = raw_prompt_batch[i]
+                assert isinstance(messages, list), f"Sample {i} is not a message list: {type(messages)}"
+                assert len(messages) > 0, f"Sample {i} has empty messages"
+
+                for msg in messages:
+                    if msg["role"] == "user":
+                        msg["content"] = f"[GymState]{gym_str} " + msg["content"]
+                        break
+
+
 
             sample_id = f"sample_{epoch}_{self.global_steps}"
 
@@ -532,6 +579,10 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         )
         if not is_cancel:
             rollout_sample.full_batch = ret
+
+            assert "request_id" in rollout_sample.full_batch.non_tensor_batch, \
+                "request_id missing! Check AgentLoopOutput.extra_fields"
+
             rollout_sample.full_batch.non_tensor_batch["uid"] = np.array(
                 [f"uid_{rollout_sample.sample_id}"] * len(rollout_sample.full_batch), dtype=object
             )

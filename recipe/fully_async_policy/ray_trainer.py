@@ -338,7 +338,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
         return batch
-
+    #接口,去request_id(str)，回float的reward
+    def get_reward(self, request_id: str) -> float:
+        """Fetch precomputed reward by request_id."""
+        return 0.0
+    
     def _process_batch_common(self, batch, metrics, timing_raw, local_trigger_step=None):
         with marked_timer("reward", timing_raw, color="yellow"):
             # compute reward model score
@@ -349,6 +353,17 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             #TODO(P0)-zsl: See if we can extract tool_reward from 'batch', since in partial_tool_agent_loop
             # tool_rewards has been updated. Otherwise, call get_reward according to the request_id
             #TODO(P0)-zh/hjl: Add interface "get_reward": (request_id: int)->(reward_score: float) # request_id should be extracted from 'batch'
+            request_ids = batch.non_tensor_batch["request_id"]
+            reward_scores = []
+            reward_extra_infos_list = []
+            for req_id in request_ids:
+                # Call your new interface
+                score = self.get_reward(req_id)
+                reward_scores.append(float(score))  # ensure float
+                # If you have per-request extra info (e.g., breakdown), fetch it here
+                # Otherwise, use empty dict
+                extra_info = getattr(self, 'get_reward_extra_info', lambda rid: {})(req_id)
+                reward_extra_infos_list.append(extra_info)
             if self.config.reward_model.launch_reward_fn_async:
                 future_reward = compute_reward_async.remote(data=batch, reward_fn=self.reward_fn)
             else:

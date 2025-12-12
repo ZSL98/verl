@@ -217,6 +217,21 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
         # Extract tool calls
         _, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids)
 
+
+        if not hasattr(agent_data, 'tools_kwargs') or agent_data.tools_kwargs is None:
+            agent_data.tools_kwargs = {}
+
+        # 假设你的工具名是 "calc_gsm8k_reward"，按需替换
+        tool_name = "http_command_sender"
+
+        if tool_name not in agent_data.tools_kwargs:
+            agent_data.tools_kwargs[tool_name] = {}
+
+        # 注入 request_id 到 create_kwargs
+        agent_data.tools_kwargs[tool_name]["create_kwargs"] = agent_data.tools_kwargs[tool_name].get("create_kwargs", {})
+        agent_data.tools_kwargs[tool_name]["create_kwargs"]["request_id"] = agent_data.request_id
+
+
         # Handle interaction if needed
         if self.interaction_config_file:
             assistant_message = await self.loop.run_in_executor(
@@ -265,6 +280,7 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
                 "is_cancel": False,
                 "param_version_start": agent_data.extra_fields["param_version_start"],
                 "param_version_end": param_version,
+                "request_id": agent_data.request_id,
             }
         )
         return output
@@ -283,5 +299,6 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
                 "is_cancel": True,
                 "agent_data": agent_data,
                 "agent_state": state,
+                "request_id": agent_data.request_id,
             },
         )

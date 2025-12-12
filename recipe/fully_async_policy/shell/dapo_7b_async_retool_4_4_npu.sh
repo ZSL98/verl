@@ -123,6 +123,7 @@ python3 -m recipe.fully_async_policy.fully_async_main \
     trainer.project_name=$project_name \
     trainer.experiment_name=$experiment_name \
     trainer.val_before_train=True \
+    trainer.val_only=True \
     trainer.log_val_generations=20 \
     trainer.save_freq=-1 \
     trainer.default_local_dir=$default_local_dir \
