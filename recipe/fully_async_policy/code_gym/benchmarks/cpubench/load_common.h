@@ -68,7 +68,7 @@ void load_controller(BaseConfig& config, BaseStats& stats, TaskFunc task_func, T
 
     // 动态调整循环
     while (duration_cast<seconds>(high_resolution_clock::now() - start_time).count() < config.runtime_sec) {
-        this_thread::sleep_for(seconds(0.2));
+        this_thread::sleep_for(microseconds(200));
         double fluct_coeff = 1.0 + (fluct_dist(rng) - config.load_fluctuation / 2) / 100.0;
         double current_load = clamp(load_dist(rng) * fluct_coeff, 0.1, 1.0);
 
