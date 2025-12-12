@@ -59,6 +59,11 @@ DISK_BLOCK_SIZE_KB = 8
 DISK_SEQUENTIAL = 0
 DISK_READ_ONLY = 0
 
+# benchmark 进程采样临时文件目录（由 load_common.h 写入）
+CODEGYM_SAMPLE_DIR = Path(os.environ.get("CODEGYM_SAMPLE_DIR", "/tmp/codegym_samples"))
+CODEGYM_SAMPLE_PREFIX = "sample_"
+CODEGYM_SAMPLE_SUFFIX = ".log"
+
 # ======================== 数据结构定义 ========================
 @dataclass
 class BindCommandResult:
@@ -165,9 +170,42 @@ def execute_shell_command(cmd_parts: List[str], timeout: int = 10) -> Dict[str, 
             "stderr": f"命令执行失败：{str(e)}"
         }
 
+def _sample_file_for_pid(pid: int) -> Path:
+    return CODEGYM_SAMPLE_DIR / f"{CODEGYM_SAMPLE_PREFIX}{pid}{CODEGYM_SAMPLE_SUFFIX}"
+
+
+def get_tracked_pids() -> List[int]:
+    cleanup_finished_processes()
+    with process_registry_lock:
+        return list(tracked_processes.keys())
+
+
+def collect_latest_benchmark_samples(pids: Optional[List[int]] = None) -> Dict[str, Any]:
+    """从临时文件读取每个进程最近一次benchmark采样日志"""
+    if pids is None:
+        pids = get_tracked_pids()
+    lines: List[str] = []
+    errors: List[str] = []
+    for pid in pids:
+        path = _sample_file_for_pid(pid)
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore").strip()
+            if text:
+                lines.append(f"PID {pid}: {text}")
+        except FileNotFoundError:
+            continue
+        except Exception as exc:
+            errors.append(f"PID {pid} 读取失败: {exc}")
+    return {
+        "exit_code": 0 if not errors else -1,
+        "stdout": "\n".join(lines),
+        "stderr": "\n".join(errors),
+    }
+
+
 def collect_baseline_sample() -> Dict[str, Any]:
     """采集当前机器的初始ps/lscpu/perf状态"""
-    return {
+    samples = {
         "ps_ef": execute_shell_command(["ps", "-ef"], timeout=5),
         "lscpu": execute_shell_command(["lscpu"], timeout=5),
         "perf_stat": execute_shell_command(
@@ -175,6 +213,8 @@ def collect_baseline_sample() -> Dict[str, Any]:
             timeout=6
         ),
     }
+    samples["benchmark_latest"] = collect_latest_benchmark_samples()
+    return samples
 
 def _is_intensive_command(tokens: List[str]) -> bool:
     """判断命令行中是否包含 *intensive 的二进制"""
@@ -483,6 +523,7 @@ def sample_process_state(pid: int) -> Dict[str, Any]:
     samples["ps_ef"] = execute_shell_command(["ps", "-ef"], timeout=5)
     samples["lscpu"] = execute_shell_command(["lscpu"], timeout=5)
     samples["perf_stat"] = execute_shell_command(["perf", "stat", "sleep", "0.5"], timeout=6)
+    samples["benchmark_latest"] = collect_latest_benchmark_samples([pid])
     return samples
 
 
@@ -548,13 +589,6 @@ def run_single_bind_command(command_str: str) -> BindCommandResult:
                 "lscpu": execute_shell_command(["lscpu"], timeout=5),
                 "perf_stat": {"exit_code": -1, "stdout": "", "stderr": "目标进程已退出，无法采样"}
             }
-
-        # 解绑：恢复CPU亲和性为全核，让进程自行结束
-        if target_pid:
-            cpu_cnt = os.cpu_count() or 1
-            full_mask = hex((1 << cpu_cnt) - 1)
-            unbind_res = execute_shell_command(["taskset", "-p", full_mask, str(target_pid)], timeout=5)
-            result.sample_results["unbind_taskset"] = unbind_res
 
         result.exit_code = proc.returncode if proc else -1
     except Exception as e:

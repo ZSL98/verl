@@ -49,7 +49,7 @@ class CodeGymClient:
             ) from exc
 
     def fetch_baseline_sample(self) -> Dict[str, Any]:
-        """从server获取初始状态的ps/lscpu/perf结果"""
+        """从server获取初始状态的ps/lscpu/perf结果，以及benchmark最新采样日志"""
         url = f"{self.server_base_url}/baseline-sample"
         resp = self.session.get(url, headers=self._headers(), timeout=20)
         return resp.json()

@@ -415,13 +415,6 @@ def run_single_bind_command(command_str: str) -> BindCommandResult:
                 "perf_stat": {"exit_code": -1, "stdout": "", "stderr": "目标进程已退出，无法采样"}
             }
 
-        # 解绑：恢复CPU亲和性为全核，让进程自行结束
-        if target_pid:
-            cpu_cnt = os.cpu_count() or 1
-            full_mask = hex((1 << cpu_cnt) - 1)
-            unbind_res = execute_shell_command(["taskset", "-p", full_mask, str(target_pid)], timeout=5)
-            result.sample_results["unbind_taskset"] = unbind_res
-
         result.exit_code = proc.returncode if proc else -1
     except Exception as e:
         result.error_msg = f"命令执行异常：{str(e)}\n{traceback.format_exc()}"
