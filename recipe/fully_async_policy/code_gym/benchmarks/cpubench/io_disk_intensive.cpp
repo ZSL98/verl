@@ -17,6 +17,12 @@ struct Stats : BaseStats {
 void disk_io_task(int duration_ms, double load_factor, Config& config, Stats& stats, int fd, size_t file_size) {
     const int block_size = config.io_block_size_kb * 1024;
     const int sector_size = 4096; // 系统页/扇区大小（根据实际环境调整）
+    // 将单次IO按更小粒度拆分统计（影响 Ops per second 的计数口径）
+    // 例如：8KB IO 记为 16 个 ops（512B/op），从而提升 disk 的 ops/s 数量级
+    constexpr size_t kOpGranularityBytes = 512;
+    const uint64_t ops_per_io = std::max<uint64_t>(
+        1, (static_cast<uint64_t>(block_size) + kOpGranularityBytes - 1) / kOpGranularityBytes
+    );
 
     // ========== 修复1：O_DIRECT缓冲区对齐 ==========
     char* io_buf = nullptr;
@@ -39,11 +45,13 @@ void disk_io_task(int duration_ms, double load_factor, Config& config, Stats& st
         return;
     }
     const size_t max_offset_idx = (file_size - block_size) / block_size;
-    uniform_int_distribution<> offset_dist(0, max_offset_idx);
+    const size_t offset_span = max_offset_idx + 1;
+    uniform_int_distribution<size_t> offset_dist(0, max_offset_idx);
     // 复用负载因子随机分布（修复6）
     static thread_local uniform_real_distribution<> load_dist(0.0, 1.0);
 
     // 局部统计变量
+    uint64_t local_io_cnt = 0;
     uint64_t local_ops = 0;
     uint64_t local_io_bytes = 0;
     uint64_t local_latency_us = 0;
@@ -64,7 +72,7 @@ void disk_io_task(int duration_ms, double load_factor, Config& config, Stats& st
         // 计算IO偏移量
         off_t offset;
         if (config.sequential) {
-            offset = (local_ops % max_offset_idx) * block_size;
+            offset = (local_io_cnt % offset_span) * block_size;
         } else {
             offset = offset_dist(rng) * block_size;
         }
@@ -96,9 +104,12 @@ void disk_io_task(int duration_ms, double load_factor, Config& config, Stats& st
             cerr << "Warning: " << (config.read_only ? "read" : "write") 
                  << " failed (offset=" << offset << "), err=" << strerror(errno) << endl;
         } else if (ret == block_size) {
+            local_io_cnt++;
             local_ops++;
+            // 按更小粒度统计 ops 与 latency（让 avg latency 不因 ops 粒度变化而异常缩小）
+            local_ops += (ops_per_io - 1);
             local_io_bytes += block_size;
-            local_latency_us += io_duration_us;
+            local_latency_us += io_duration_us * ops_per_io;
         } else {
             // 处理部分读写
             lock_guard<mutex> lock(stats.stats_mtx);

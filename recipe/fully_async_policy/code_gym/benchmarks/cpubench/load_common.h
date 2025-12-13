@@ -89,12 +89,12 @@ void load_controller(BaseConfig& config, BaseStats& stats, TaskFunc task_func, T
     // 初始化基础线程
     stats.current_threads = config.base_threads;
     for (int i = 0; i < config.base_threads; ++i) {
-        worker_threads.emplace_back(task_func, 200, 1.0, forward<TaskArgs>(args)...);
+        worker_threads.emplace_back(task_func, 400, 1.0, forward<TaskArgs>(args)...);
     }
 
     // 动态调整循环
     while (duration_cast<seconds>(high_resolution_clock::now() - start_time).count() < config.runtime_sec) {
-        this_thread::sleep_for(milliseconds(200));
+        this_thread::sleep_for(milliseconds(400));
         double fluct_coeff = 1.0 + (fluct_dist(rng) - config.load_fluctuation / 2) / 100.0;
         double current_load = clamp(load_dist(rng) * fluct_coeff, 0.1, 1.0);
 
@@ -111,14 +111,14 @@ void load_controller(BaseConfig& config, BaseStats& stats, TaskFunc task_func, T
             }
             // 添加新线程
             while (stats.current_threads < target_threads) {
-                worker_threads.emplace_back(task_func, 200, current_load, forward<TaskArgs>(args)...);
+                worker_threads.emplace_back(task_func, 400, current_load, forward<TaskArgs>(args)...);
                 stats.current_threads++;
             }
         } else {
             // 固定线程数，调整负载强度
             for (auto& t : worker_threads) {
                 if (t.joinable()) t.join();
-                t = thread(task_func, 200, 1.0, forward<TaskArgs>(args)...);
+                t = thread(task_func, 400, 1.0, forward<TaskArgs>(args)...);
             }
         }
 

@@ -13,6 +13,11 @@ struct Stats : BaseStats {
 // 缓存敏感任务：循环访问固定大小的数组（确保高缓存命中）
 void cache_task(int duration_ms, double load_factor, Config& config, Stats& stats, vector<int>& cache_buf) {
     const int ops_per_iter = 5000;
+    // 调大单次统计粒度：将 1 个 op 定义为约 1000 次缓存微访问，降低 ops/s 数量级
+    constexpr uint64_t kMicroOpsPerLogicalOp = 1000;
+    const uint64_t logical_ops_per_iter = std::max<uint64_t>(
+        1, static_cast<uint64_t>(ops_per_iter) / kMicroOpsPerLogicalOp
+    );
     size_t buf_size = cache_buf.size();
     uint64_t local_ops = 0;
     uint64_t local_hits = 0;
@@ -39,7 +44,7 @@ void cache_task(int duration_ms, double load_factor, Config& config, Stats& stat
                 local_misses++;
             }
         }
-        local_ops += ops_per_iter;
+        local_ops += logical_ops_per_iter;
     }
 
     stats.total_ops += local_ops;

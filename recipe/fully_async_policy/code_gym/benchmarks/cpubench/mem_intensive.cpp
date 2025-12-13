@@ -13,6 +13,11 @@ struct Stats : BaseStats {
 
 void mem_task(int duration_ms, double load_factor, Config& config, Stats& stats, vector<char>& mem_buf) {
     const int ops_per_iter = 1500;
+    // 调大单次统计粒度：将 1 个 op 定义为约 1000 次内存微访问，降低 ops/s 数量级
+    constexpr uint64_t kMicroOpsPerLogicalOp = 1000;
+    const uint64_t logical_ops_per_iter = std::max<uint64_t>(
+        1, static_cast<uint64_t>(ops_per_iter) / kMicroOpsPerLogicalOp
+    );
     size_t buf_size = mem_buf.size();
     int granularity = config.mem_access_granularity;
     uint64_t local_ops = 0;
@@ -42,11 +47,11 @@ void mem_task(int duration_ms, double load_factor, Config& config, Stats& stats,
             mem_buf[(idx + granularity/2) % buf_size] += mem_buf[idx];
             mem_buf[(idx + granularity) % buf_size] = ~mem_buf[idx];
 
-            local_ops++;
             local_mem_bytes += granularity * 3;  // 3次访问/操作
             // 缓存缺失估算
             if (!config.sequential || granularity > 64) local_cache_misses++;
         }
+        local_ops += logical_ops_per_iter;
     }
 
     stats.total_ops += local_ops;

@@ -13,6 +13,11 @@ struct Stats : BaseStats {
 // 计算密集型任务（高ALU占用）
 void compute_task(int duration_ms, double load_factor, Config& config, Stats& stats) {
     const int local_ops_per_iter = config.ops_per_iter;
+    // 调大单次统计粒度：将 1 个 op 定义为约 1000 次微运算，降低 ops/s 数量级
+    constexpr uint64_t kMicroOpsPerLogicalOp = 1000;
+    const uint64_t logical_ops_per_iter = std::max<uint64_t>(
+        1, static_cast<uint64_t>(local_ops_per_iter) / kMicroOpsPerLogicalOp
+    );
     double a = 3.1415926535, b = 2.7182818284, c = 1.4142135623, d = 0.5772156649;
     uint64_t local_ops = 0;
     uint64_t local_float_ops = 0;
@@ -31,8 +36,8 @@ void compute_task(int duration_ms, double load_factor, Config& config, Stats& st
             c = pow(a, 0.333) + tan(b);
             d = (d + c) * exp(-a / 1000.0);
         }
-        local_ops += local_ops_per_iter;
-        local_float_ops += local_ops_per_iter * 4;  // 每次循环4次浮点运算
+        local_ops += logical_ops_per_iter;
+        local_float_ops += static_cast<uint64_t>(local_ops_per_iter) * 4;  // 每次循环4次浮点运算
     }
 
     stats.total_ops += local_ops;
