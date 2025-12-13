@@ -131,7 +131,7 @@ void load_controller(BaseConfig& config, BaseStats& stats, TaskFunc task_func, T
             << "CPU Usage(est): " << fixed << setprecision(1)
             << (stats.total_cpu_time / (elapsed * stats.current_threads)) * 100 << "% | "
             << "Load Factor: " << fixed << setprecision(2) << current_load;
-        stats.total_ops = 0
+        stats.total_ops = 0;
         const std::string line = oss.str();
         cout << line << endl;
         write_codegym_latest_sample(line);
