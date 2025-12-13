@@ -18,8 +18,7 @@ void disk_io_task(int duration_ms, double load_factor, Config& config, Stats& st
     const int block_size = config.io_block_size_kb * 1024;
     const int sector_size = 4096; // 系统页/扇区大小（根据实际环境调整）
     // 将单次IO按更小粒度拆分统计（影响 Ops per second 的计数口径）
-    // 例如：8KB IO 记为 16 个 ops（512B/op），从而提升 disk 的 ops/s 数量级
-    constexpr size_t kOpGranularityBytes = 512;
+    constexpr size_t kOpGranularityBytes = 1024;
     const uint64_t ops_per_io = std::max<uint64_t>(
         1, (static_cast<uint64_t>(block_size) + kOpGranularityBytes - 1) / kOpGranularityBytes
     );

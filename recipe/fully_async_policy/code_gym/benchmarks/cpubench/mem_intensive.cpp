@@ -13,8 +13,7 @@ struct Stats : BaseStats {
 
 void mem_task(int duration_ms, double load_factor, Config& config, Stats& stats, vector<char>& mem_buf) {
     const int ops_per_iter = 1500;
-    // 调大单次统计粒度：将 1 个 op 定义为约 1000 次内存微访问，降低 ops/s 数量级
-    constexpr uint64_t kMicroOpsPerLogicalOp = 1000;
+    constexpr uint64_t kMicroOpsPerLogicalOp = 10000;
     const uint64_t logical_ops_per_iter = std::max<uint64_t>(
         1, static_cast<uint64_t>(ops_per_iter) / kMicroOpsPerLogicalOp
     );

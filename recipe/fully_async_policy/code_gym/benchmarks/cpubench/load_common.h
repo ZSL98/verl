@@ -127,10 +127,7 @@ void load_controller(BaseConfig& config, BaseStats& stats, TaskFunc task_func, T
         double elapsed = duration_cast<milliseconds>(high_resolution_clock::now() - start_time).count();
         oss << "[" << config.load_name << " | " << fixed << setprecision(2) << elapsed / 1000 << "s] "
             << "Threads: " << stats.current_threads << " | "
-            << "Ops per second: " << (double)stats.total_ops / 400 * 1000 << " | "
-            << "CPU Usage(est): " << fixed << setprecision(1)
-            << (stats.total_cpu_time / (elapsed * stats.current_threads)) * 100 << "% | "
-            << "Load Factor: " << fixed << setprecision(2) << current_load;
+            << "Ops per second: " << (double)stats.total_ops / 400 * 1000 << " | ";
         stats.total_ops = 0;
         const std::string line = oss.str();
         cout << line << endl;
