@@ -118,7 +118,7 @@ void load_controller(BaseConfig& config, BaseStats& stats, TaskFunc task_func, T
             // 固定线程数，调整负载强度
             for (auto& t : worker_threads) {
                 if (t.joinable()) t.join();
-                t = thread(task_func, 200, 0, forward<TaskArgs>(args)...);
+                t = thread(task_func, 200, 1.0, forward<TaskArgs>(args)...);
             }
         }
 
@@ -127,10 +127,11 @@ void load_controller(BaseConfig& config, BaseStats& stats, TaskFunc task_func, T
         double elapsed = duration_cast<milliseconds>(high_resolution_clock::now() - start_time).count();
         oss << "[" << config.load_name << " | " << fixed << setprecision(2) << elapsed / 1000 << "s] "
             << "Threads: " << stats.current_threads << " | "
-            << "Ops: " << stats.total_ops << " | "
+            << "Ops per second: " << (double)stats.total_ops / elapsed * 1000 << " | "
             << "CPU Usage(est): " << fixed << setprecision(1)
             << (stats.total_cpu_time / (elapsed * stats.current_threads)) * 100 << "% | "
             << "Load Factor: " << fixed << setprecision(2) << current_load;
+        stats.total_ops = 0
         const std::string line = oss.str();
         cout << line << endl;
         write_codegym_latest_sample(line);
