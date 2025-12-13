@@ -94,7 +94,7 @@ void load_controller(BaseConfig& config, BaseStats& stats, TaskFunc task_func, T
 
     // 动态调整循环
     while (duration_cast<seconds>(high_resolution_clock::now() - start_time).count() < config.runtime_sec) {
-        this_thread::sleep_for(microseconds(200));
+        this_thread::sleep_for(milliseconds(200));
         double fluct_coeff = 1.0 + (fluct_dist(rng) - config.load_fluctuation / 2) / 100.0;
         double current_load = clamp(load_dist(rng) * fluct_coeff, 0.1, 1.0);
 
@@ -124,10 +124,10 @@ void load_controller(BaseConfig& config, BaseStats& stats, TaskFunc task_func, T
 
         // 实时输出统计
         std::ostringstream oss;
-        double elapsed = duration_cast<seconds>(high_resolution_clock::now() - start_time).count();
-        oss << "[" << config.load_name << " | " << fixed << setprecision(1) << elapsed << "s] "
+        double elapsed = duration_cast<milliseconds>(high_resolution_clock::now() - start_time).count();
+        oss << "[" << config.load_name << " | " << fixed << setprecision(2) << elapsed / 1000 << "s] "
             << "Threads: " << stats.current_threads << " | "
-            << "Ops: " << stats.total_ops / 1e6 << "M | "
+            << "Ops: " << stats.total_ops << " | "
             << "CPU Usage(est): " << fixed << setprecision(1)
             << (stats.total_cpu_time / (elapsed * stats.current_threads)) * 100 << "% | "
             << "Load Factor: " << fixed << setprecision(2) << current_load;
