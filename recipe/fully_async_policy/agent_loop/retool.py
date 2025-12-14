@@ -71,30 +71,8 @@ class CustomSandboxFusionTool(SandboxFusionTool):
         self._instance_dict = {}
         self._codegym = CodeGymClient()
 
-    async def create(
-        self, instance_id: Optional[str] = None, ground_truth: Optional[str] = None, **kwargs
-    ) -> tuple[str, ToolResponse]:
-        if instance_id is None:
-            instance_id = str(uuid4())
-        
-        create_kwargs = kwargs.get("create_kwargs", {})
-        
-        request_id = create_kwargs.get("request_id", None)
-        ground_truth = ground_truth or create_kwargs.get("ground_truth", None)
-
-        self._instance_dict[instance_id] = {
-            "response": "",
-            "ground_truth": ground_truth,
-            "reward": 0.0,
-            "request_id": request_id,
-        }
-
-        logger.info(f"Created tool instance {instance_id} for request_id={request_id}")
-        return instance_id, ToolResponse()
-
     @rollout_trace_op
     async def execute(self, instance_id: str, parameters: dict[str, Any], **kwargs) -> tuple[str, float, dict]:
-
         command = parameters.get("command")
         if not isinstance(command, str):
             command = str(command)

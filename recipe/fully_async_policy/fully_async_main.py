@@ -242,6 +242,7 @@ class FullyAsyncTaskRunner:
         trainer = FullyAsyncTrainer.remote(
             config=config,
             tokenizer=self.components["tokenizer"],
+            codegym_client=self.components["codegym_client"],
             role_worker_mapping=trainer_role_mapping,
             resource_pool_manager=create_resource_pool_manager(config, roles=list(trainer_role_mapping.keys())),
             ray_worker_group_cls=self.components["ray_worker_group_cls"],

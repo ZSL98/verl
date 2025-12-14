@@ -47,6 +47,7 @@ from verl.utils.metric import (
     reduce_metrics,
 )
 from verl.utils.rollout_skip import RolloutSkip
+from recipe.fully_async_policy.code_gym.communicator.client import CodeGymClient
 
 
 class FullyAsyncRayPPOTrainer(RayPPOTrainer):
@@ -62,6 +63,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self._init_worker_groups()
         self._init_models()
         self._init_async_rollout_manager()
+        self.codegym_client = CodeGymClient()
 
     def _init_resource_pools(self):
         self.resource_pool_manager.create_resource_pool()
@@ -349,6 +351,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             #TODO(P0)-zsl: See if we can extract tool_reward from 'batch', since in partial_tool_agent_loop
             # tool_rewards has been updated. Otherwise, call get_reward according to the request_id
             #TODO(P0)-zh/hjl: Add interface "get_reward": (request_id: int)->(reward_score: float) # request_id should be extracted from 'batch'
+            request_id = 0
+            bind_result = self.codegym_client.query_bind_result(request_id)
+            # get_reward
+            
             if self.config.reward_model.launch_reward_fn_async:
                 future_reward = compute_reward_async.remote(data=batch, reward_fn=self.reward_fn)
             else:
