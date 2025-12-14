@@ -259,7 +259,12 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             #                           and selected benchmarks as strings
             #TODO(P0)-hjl rl: Store the profiling_result and corun_benchmarks into a dict (self.gym_state)
             self.pid_msg, self.ps_result, self.lscpu_result, self.perf_result , self.latest_log = self._state_switch(version)
-            
+            print(f"pid_msg = {self.pid_msg}")
+            print(f"ps_result = {self.ps_result}")
+            print(f"lscpu_result = {self.lscpu_result}")
+            print(f"perf_result = {self.perf_result}")
+            print(f"latest_log = {self.latest_log}")
+
             old_version = self.current_param_version
             self.current_param_version = version
             # every time param change, reset staleness_samples
