@@ -1,9 +1,11 @@
+import random
+import threading
 import time
 import uuid
-import requests
-import random
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
+
+import requests
 
 
 SERVER_BASE_URL = "http://127.0.0.1:8000"
@@ -11,6 +13,15 @@ API_KEY = "container-a-secure-key-2025"
 
 
 class CodeGymClient:
+    _instance: Optional["CodeGymClient"] = None
+    _instance_lock = threading.Lock()
+
+    def __new__(cls, *args, **kwargs) -> "CodeGymClient":
+        if cls._instance is None:
+            with cls._instance_lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+        return cls._instance
 
     def __init__(
         self,
@@ -22,17 +33,58 @@ class CodeGymClient:
         """
         初始化客户端，并与同目录下的 server.py 提供的服务做一次健康检查连接。
         """
-        self.server_base_url = server_base_url.rstrip("/")
-        self.api_key = api_key
-        self.session = session or requests.Session()
-        self.session.headers.update(
-            {
-                "X-API-Key": self.api_key,
-                "Content-Type": "application/json",
-            }
-        )
-        self.health_timeout = health_timeout
-        self._ensure_server_ready()
+        if getattr(self, "_initialized", False):
+            self._validate_singleton_args(server_base_url, api_key, session, health_timeout)
+            return
+
+        with self.__class__._instance_lock:
+            if getattr(self, "_initialized", False):
+                self._validate_singleton_args(server_base_url, api_key, session, health_timeout)
+                return
+
+            self.server_base_url = server_base_url.rstrip("/")
+            self.api_key = api_key
+            self.session = session or requests.Session()
+            self.session.headers.update(
+                {
+                    "X-API-Key": self.api_key,
+                    "Content-Type": "application/json",
+                }
+            )
+            self.health_timeout = health_timeout
+            self._ensure_server_ready()
+            self._initialized = True
+
+    def __copy__(self) -> "CodeGymClient":
+        return self
+
+    def __deepcopy__(self, memo) -> "CodeGymClient":
+        return self
+
+    def _validate_singleton_args(
+        self,
+        server_base_url: str,
+        api_key: str,
+        session: Optional[requests.Session],
+        health_timeout: int,
+    ) -> None:
+        normalized_url = server_base_url.rstrip("/")
+        if normalized_url != self.server_base_url:
+            raise RuntimeError(
+                "CodeGymClient 是单例：已初始化完成；后续请直接调用 CodeGymClient() 获取实例，或确保参数一致。"
+            )
+        if api_key != self.api_key:
+            raise RuntimeError(
+                "CodeGymClient 是单例：已初始化完成；后续请直接调用 CodeGymClient() 获取实例，或确保参数一致。"
+            )
+        if health_timeout != self.health_timeout:
+            raise RuntimeError(
+                "CodeGymClient 是单例：已初始化完成；后续请直接调用 CodeGymClient() 获取实例，或确保参数一致。"
+            )
+        if session is not None and session is not self.session:
+            raise RuntimeError(
+                "CodeGymClient 是单例：已初始化完成；后续请直接调用 CodeGymClient() 获取实例，或确保参数一致。"
+            )
 
     def _headers(self) -> Dict[str, str]:
         return dict(self.session.headers)
@@ -54,14 +106,12 @@ class CodeGymClient:
         resp = self.session.get(url, headers=self._headers(), timeout=20)
         return resp.json()
 
-
     def submit_bind_task(self, request_id: str, commands: List[str]) -> Dict[str, Any]:
         """提交绑核指令序列"""
         url = f"{self.server_base_url}/bind-tasks"
         payload = {"request_id": request_id, "bind_commands": commands}
         resp = self.session.post(url, json=payload, headers=self._headers(), timeout=20)
         return resp.json()
-
 
     def query_bind_result(self, request_id: str) -> Dict[str, Any]:
         """查询绑核任务结果"""
@@ -81,7 +131,6 @@ class CodeGymClient:
         resp = self.session.post(url, headers=self._headers(), timeout=10)
         return resp.json()
 
-
     def print_sample_results(self, title: str, samples: Dict[str, Any]) -> None:
         print(f"\n=== {title} ===")
         for name, result in samples.items():
@@ -92,7 +141,6 @@ class CodeGymClient:
                 print(f"stdout:\n{stdout}")
             if stderr:
                 print(f"stderr:\n{stderr}")
-
 
     def pick_intensive_pid_from_ps(self, ps_stdout: str) -> int:
         """从ps -ef输出中随机挑选一个 *intensive 结尾的进程PID"""
@@ -112,45 +160,46 @@ class CodeGymClient:
             raise RuntimeError("未找到 *intensive 结尾的进程供绑核")
         return random.choice(candidates)
 
-# def main() -> None:
-#     """
-#     执行示例流程：
-#     1) 采集基线 ps/lscpu/perf 结果并打印
-#     2) 从 ps -ef 输出中挑选一个 *intensive 进程，生成 taskset 绑核指令
-#     3) 提交绑核任务并轮询查询结果，最终打印采样输出
-#     """
-#     client = CodeGymClient()
 
-#     baseline = client.fetch_baseline_sample()
-#     print(f"基线采样响应：code={baseline.get('code')} msg={baseline.get('msg')}")
-#     if baseline.get("data"):
-#         client.print_sample_results("初始状态", baseline["data"])
+def main() -> None:
+    """
+    执行示例流程：
+    1) 采集基线 ps/lscpu/perf 结果并打印
+    2) 从 ps -ef 输出中挑选一个 *intensive 进程，生成 taskset 绑核指令
+    3) 提交绑核任务并轮询查询结果，最终打印采样输出
+    """
+    client = CodeGymClient()
 
-#     ps_stdout = baseline.get("data", {}).get("ps_ef", {}).get("stdout", "")
-#     try:
-#         target_pid = client.pick_intensive_pid_from_ps(ps_stdout)
-#     except RuntimeError as exc:
-#         print(f"选取目标PID失败：{exc}")
-#         return
-#     print(f"\n选中的目标PID：{target_pid}")
+    baseline = client.fetch_baseline_sample()
+    print(f"基线采样响应：code={baseline.get('code')} msg={baseline.get('msg')}")
+    if baseline.get("data"):
+        client.print_sample_results("初始状态", baseline["data"])
 
-#     request_id = f"client-{uuid.uuid4()}"
-#     bind_commands = [f"taskset -cp 0 {target_pid}"]
-#     submit_resp = client.submit_bind_task(request_id, bind_commands)
-#     print(f"\n提交结果：code={submit_resp.get('code')} msg={submit_resp.get('msg')} request_id={request_id}")
+    ps_stdout = baseline.get("data", {}).get("ps_ef", {}).get("stdout", "")
+    try:
+        target_pid = client.pick_intensive_pid_from_ps(ps_stdout)
+    except RuntimeError as exc:
+        print(f"选取目标PID失败：{exc}")
+        return
+    print(f"\n选中的目标PID：{target_pid}")
 
-#     for _ in range(10):
-#         time.sleep(1)
-#         query_resp = client.query_bind_result(request_id)
-#         code = query_resp.get("code")
-#         if code in (200, 500):
-#             print(f"\n查询结果：code={code} msg={query_resp.get('msg')}")
-#             data = query_resp.get("data", {}) or {}
-#             for idx, cmd_result in enumerate(data.get("command_results", []), start=1):
-#                 print(f"\n--- 指令 {idx}: {cmd_result.get('command')} ---")
-#                 print(f"bind_success={cmd_result.get('bind_success')}, exit_code={cmd_result.get('exit_code')}")
-#                 client.print_sample_results("采样结果", cmd_result.get("sample_results", {}))
-#             break
-#         print(f"任务未完成，继续等待... (status code={code})")
-#     else:
-#         print("查询超时，未获取到结果")
+    request_id = f"client-{uuid.uuid4()}"
+    bind_commands = [f"taskset -cp 0 {target_pid}"]
+    submit_resp = client.submit_bind_task(request_id, bind_commands)
+    print(f"\n提交结果：code={submit_resp.get('code')} msg={submit_resp.get('msg')} request_id={request_id}")
+
+    for _ in range(10):
+        time.sleep(1)
+        query_resp = client.query_bind_result(request_id)
+        code = query_resp.get("code")
+        if code in (200, 500):
+            print(f"\n查询结果：code={code} msg={query_resp.get('msg')}")
+            data = query_resp.get("data", {}) or {}
+            for idx, cmd_result in enumerate(data.get("command_results", []), start=1):
+                print(f"\n--- 指令 {idx}: {cmd_result.get('command')} ---")
+                print(f"bind_success={cmd_result.get('bind_success')}, exit_code={cmd_result.get('exit_code')}")
+                client.print_sample_results("采样结果", cmd_result.get("sample_results", {}))
+            break
+        print(f"任务未完成，继续等待... (status code={code})")
+    else:
+        print("查询超时，未获取到结果")
