@@ -112,49 +112,45 @@ class CodeGymClient:
             raise RuntimeError("未找到 *intensive 结尾的进程供绑核")
         return random.choice(candidates)
 
-def main() -> None:
-    """
-    执行示例流程：
-    1) 采集基线 ps/lscpu/perf 结果并打印
-    2) 从 ps -ef 输出中挑选一个 *intensive 进程，生成 taskset 绑核指令
-    3) 提交绑核任务并轮询查询结果，最终打印采样输出
-    """
-    client = CodeGymClient()
+# def main() -> None:
+#     """
+#     执行示例流程：
+#     1) 采集基线 ps/lscpu/perf 结果并打印
+#     2) 从 ps -ef 输出中挑选一个 *intensive 进程，生成 taskset 绑核指令
+#     3) 提交绑核任务并轮询查询结果，最终打印采样输出
+#     """
+#     client = CodeGymClient()
 
-    baseline = client.fetch_baseline_sample()
-    print(f"基线采样响应：code={baseline.get('code')} msg={baseline.get('msg')}")
-    if baseline.get("data"):
-        client.print_sample_results("初始状态", baseline["data"])
+#     baseline = client.fetch_baseline_sample()
+#     print(f"基线采样响应：code={baseline.get('code')} msg={baseline.get('msg')}")
+#     if baseline.get("data"):
+#         client.print_sample_results("初始状态", baseline["data"])
 
-    ps_stdout = baseline.get("data", {}).get("ps_ef", {}).get("stdout", "")
-    try:
-        target_pid = client.pick_intensive_pid_from_ps(ps_stdout)
-    except RuntimeError as exc:
-        print(f"选取目标PID失败：{exc}")
-        return
-    print(f"\n选中的目标PID：{target_pid}")
+#     ps_stdout = baseline.get("data", {}).get("ps_ef", {}).get("stdout", "")
+#     try:
+#         target_pid = client.pick_intensive_pid_from_ps(ps_stdout)
+#     except RuntimeError as exc:
+#         print(f"选取目标PID失败：{exc}")
+#         return
+#     print(f"\n选中的目标PID：{target_pid}")
 
-    request_id = f"client-{uuid.uuid4()}"
-    bind_commands = [f"taskset -cp 0 {target_pid}"]
-    submit_resp = client.submit_bind_task(request_id, bind_commands)
-    print(f"\n提交结果：code={submit_resp.get('code')} msg={submit_resp.get('msg')} request_id={request_id}")
+#     request_id = f"client-{uuid.uuid4()}"
+#     bind_commands = [f"taskset -cp 0 {target_pid}"]
+#     submit_resp = client.submit_bind_task(request_id, bind_commands)
+#     print(f"\n提交结果：code={submit_resp.get('code')} msg={submit_resp.get('msg')} request_id={request_id}")
 
-    for _ in range(10):
-        time.sleep(1)
-        query_resp = client.query_bind_result(request_id)
-        code = query_resp.get("code")
-        if code in (200, 500):
-            print(f"\n查询结果：code={code} msg={query_resp.get('msg')}")
-            data = query_resp.get("data", {}) or {}
-            for idx, cmd_result in enumerate(data.get("command_results", []), start=1):
-                print(f"\n--- 指令 {idx}: {cmd_result.get('command')} ---")
-                print(f"bind_success={cmd_result.get('bind_success')}, exit_code={cmd_result.get('exit_code')}")
-                client.print_sample_results("采样结果", cmd_result.get("sample_results", {}))
-            break
-        print(f"任务未完成，继续等待... (status code={code})")
-    else:
-        print("查询超时，未获取到结果")
-
-
-if __name__ == "__main__":
-    main()
+#     for _ in range(10):
+#         time.sleep(1)
+#         query_resp = client.query_bind_result(request_id)
+#         code = query_resp.get("code")
+#         if code in (200, 500):
+#             print(f"\n查询结果：code={code} msg={query_resp.get('msg')}")
+#             data = query_resp.get("data", {}) or {}
+#             for idx, cmd_result in enumerate(data.get("command_results", []), start=1):
+#                 print(f"\n--- 指令 {idx}: {cmd_result.get('command')} ---")
+#                 print(f"bind_success={cmd_result.get('bind_success')}, exit_code={cmd_result.get('exit_code')}")
+#                 client.print_sample_results("采样结果", cmd_result.get("sample_results", {}))
+#             break
+#         print(f"任务未完成，继续等待... (status code={code})")
+#     else:
+#         print("查询超时，未获取到结果")

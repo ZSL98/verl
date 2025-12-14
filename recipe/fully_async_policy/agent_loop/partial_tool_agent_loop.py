@@ -265,6 +265,7 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
                 "is_cancel": False,
                 "param_version_start": agent_data.extra_fields["param_version_start"],
                 "param_version_end": param_version,
+                "request_id": agent_data.request_id,
             }
         )
         return output
@@ -283,5 +284,6 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
                 "is_cancel": True,
                 "agent_data": agent_data,
                 "agent_state": state,
+                "request_id": agent_data.request_id,
             },
         )

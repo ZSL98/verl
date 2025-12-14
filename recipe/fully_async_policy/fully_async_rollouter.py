@@ -245,6 +245,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             profiling_data.get("ps_ef"),
             profiling_data.get("lscpu"),
             profiling_data.get("perf_stat"),
+            profiling_data.get("benchmark_latest")
         )
 
     async def update_param_version(self, version: int, validate: bool = False, global_steps: int = 0):
@@ -257,7 +258,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             #                           then returns the profiling result (cpu util, ops) 
             #                           and selected benchmarks as strings
             #TODO(P0)-hjl rl: Store the profiling_result and corun_benchmarks into a dict (self.gym_state)
-            self.pid_msg, self.ps_result, self.lscpu_result, self.perf_result = self._state_switch(version)
+            self.pid_msg, self.ps_result, self.lscpu_result, self.perf_result , self.latest_log = self._state_switch(version)
             
             old_version = self.current_param_version
             self.current_param_version = version
@@ -435,7 +436,18 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             # Similar to _prepare_generate_batch: Separate data
             full_batch = prepare_single_generation_data(batch_dict, self.config)
             #TODO(P0)-hjl: The raw prompt is inside full_batch, attach the contents in self.gym_state:dict onto the raw prompt
+            gym_str = self.ps_result + self.lscpu_result + self.perf_result
+            raw_prompt_batch = full_batch.non_tensor_batch["raw_prompt"]
+            for i in range(len(raw_prompt_batch)):
+                messages = raw_prompt_batch[i]
+                assert isinstance(messages, list), f"Sample {i} is not a message list: {type(messages)}"
+                assert len(messages) > 0, f"Sample {i} has empty messages"
 
+                for msg in messages:
+                    if msg["role"] == "user":
+                        msg["content"] = f"[pids]{self.pid_msg}, [GymState]{gym_str} " + msg["content"]
+                        break
+            
             sample_id = f"sample_{epoch}_{self.global_steps}"
 
             rollout_sample = RolloutSample(
