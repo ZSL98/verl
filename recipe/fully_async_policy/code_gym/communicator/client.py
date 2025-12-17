@@ -152,7 +152,12 @@ class CodeGymClient:
                     loads = metrics.get("loads")
                     misses = metrics.get("misses")
                     exit_code = metrics.get("exit_code")
-                    print(f"  - pid={pid} hit_rate={hit_rate} loads={loads} misses={misses} exit_code={exit_code}")
+                    attempt = metrics.get("attempt")
+                    sample_seconds = metrics.get("sample_seconds")
+                    retry_note = ""
+                    if attempt and attempt != 1:
+                        retry_note = f" attempt={attempt} sample_seconds={sample_seconds}"
+                    print(f"  - pid={pid} hit_rate={hit_rate} loads={loads} misses={misses} exit_code={exit_code}{retry_note}")
                 stderr = result.get("stderr", "")
                 if stderr:
                     print(f"stderr:\n{stderr}")
@@ -273,6 +278,3 @@ def main() -> None:
         print(f"任务未完成，继续等待... (status code={code})")
     else:
         print("查询超时，未获取到结果")
-
-if __name__ == "__main__":
-    main()

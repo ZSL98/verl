@@ -225,6 +225,32 @@ def _parse_perf_stat_csv(stderr_text: str) -> Dict[str, Optional[float]]:
     return counters
 
 
+def _get_perf_counter_value(counters: Dict[str, Optional[float]], event_name: str) -> Optional[float]:
+    """兼容 perf 输出 event 名带 :u/:k 等修饰符的情况。"""
+    if event_name in counters:
+        return counters[event_name]
+    for key, value in counters.items():
+        base = key.split(":", 1)[0]
+        if base == event_name:
+            return value
+    return None
+
+
+def _perf_output_indicates_unsupported(stderr_text: str) -> bool:
+    lowered = stderr_text.lower()
+    return (
+        "not supported" in lowered
+        or "unknown event" in lowered
+        or "failed to find event" in lowered
+        or "no such file or directory" in lowered
+    )
+
+
+def _perf_output_indicates_permission_issue(stderr_text: str) -> bool:
+    lowered = stderr_text.lower()
+    return ("permission" in lowered and "denied" in lowered) or "no permission" in lowered
+
+
 def _perf_sample_l3_hit_rate_for_pid(
     pid: int,
     sample_seconds: float,
@@ -245,9 +271,10 @@ def _perf_sample_l3_hit_rate_for_pid(
         str(sample_seconds),
     ]
     raw = execute_shell_command(cmd, timeout=max(6, int(sample_seconds) + 5))
-    counters = _parse_perf_stat_csv(raw.get("stderr", ""))
-    loads = counters.get(loads_event)
-    misses = counters.get(misses_event)
+    perf_text = f"{raw.get('stderr', '')}\n{raw.get('stdout', '')}"
+    counters = _parse_perf_stat_csv(perf_text)
+    loads = _get_perf_counter_value(counters, loads_event)
+    misses = _get_perf_counter_value(counters, misses_event)
     hit_rate: Optional[float] = None
     if loads is not None and misses is not None and loads > 0:
         hit_rate = max(0.0, min(1.0, (loads - misses) / loads))
@@ -259,6 +286,49 @@ def _perf_sample_l3_hit_rate_for_pid(
         "misses": misses,
         "hit_rate": hit_rate,
         "stderr": raw.get("stderr", ""),
+        "stdout": raw.get("stdout", ""),
+    }
+
+
+def _perf_sample_l3_hit_rate_for_pid_with_retry(
+    pid: int,
+    sample_seconds: float,
+    loads_event: str,
+    misses_event: str,
+    max_attempts: int = 3,
+) -> Dict[str, Any]:
+    """
+    perf stat 偶发会输出 <not counted> 导致 loads/misses 解析为 None。
+    这里通过延长采样窗口重试，尽量保证返回可用于计算 hit_rate 的计数结果。
+    """
+    last: Optional[Dict[str, Any]] = None
+    for attempt in range(1, max_attempts + 1):
+        duration = sample_seconds * (2 ** (attempt - 1))
+        sample = _perf_sample_l3_hit_rate_for_pid(pid, duration, loads_event, misses_event)
+        sample["attempt"] = attempt
+        sample["sample_seconds"] = duration
+        last = sample
+
+        loads = sample.get("loads")
+        misses = sample.get("misses")
+        if loads is not None and misses is not None and loads > 0:
+            return sample
+
+        stderr_text = str(sample.get("stderr", "") or "")
+        if _perf_output_indicates_permission_issue(stderr_text) or _perf_output_indicates_unsupported(stderr_text):
+            break
+
+    return last or {
+        "exit_code": -2,
+        "loads_event": loads_event,
+        "misses_event": misses_event,
+        "loads": None,
+        "misses": None,
+        "hit_rate": None,
+        "stderr": "perf 采样失败：无可用结果",
+        "stdout": "",
+        "attempt": 0,
+        "sample_seconds": sample_seconds,
     }
 
 
@@ -283,9 +353,9 @@ def sample_workload_l3_hit_rate(
     ]
     loads_event, misses_event = event_candidates[0]
 
-    # 先用首个PID探测一次事件是否可用；失败则回退到更通用的 cache-* 事件
+    # 先用首个PID探测一次事件是否可用；仅当明确“不支持”时回退到更通用的 cache-* 事件
     probe = _perf_sample_l3_hit_rate_for_pid(pids[0], min(sample_seconds, 0.2), loads_event, misses_event)
-    if probe.get("exit_code") != 0 or probe.get("loads") is None or probe.get("misses") is None:
+    if _perf_output_indicates_unsupported(str(probe.get("stderr", "") or "")):
         loads_event, misses_event = event_candidates[1]
 
     results: Dict[str, Any] = {}
@@ -293,7 +363,7 @@ def sample_workload_l3_hit_rate(
     worker_count = max(1, min(max_workers, len(pids)))
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         future_map = {
-            executor.submit(_perf_sample_l3_hit_rate_for_pid, pid, sample_seconds, loads_event, misses_event): pid
+            executor.submit(_perf_sample_l3_hit_rate_for_pid_with_retry, pid, sample_seconds, loads_event, misses_event): pid
             for pid in pids
         }
         for future in as_completed(future_map):
@@ -482,6 +552,18 @@ def compute_ops_change_rate_reward(
         "before_ops_per_second": {str(pid): val for pid, val in before_ops.items()},
         "after_ops_per_second": {str(pid): val for pid, val in after_ops.items()},
         "stderr": "\n".join(stderr_parts),
+    }
+
+
+def failure_reward(reason: str) -> Dict[str, Any]:
+    return {
+        "exit_code": -1,
+        "score": -1.0,
+        "stdout": "",
+        "per_pid_change_rate": {},
+        "before_ops_per_second": {},
+        "after_ops_per_second": {},
+        "stderr": reason,
     }
 
 
@@ -831,16 +913,19 @@ def run_single_bind_command(command_str: str) -> BindCommandResult:
         cmd_parts = shlex.split(command_str)
         if not cmd_parts:
             result.error_msg = "命令不能为空"
+            result.reward = failure_reward(result.error_msg)
             return result
 
         base_cmd = cmd_parts[0]
         if base_cmd not in ALLOWED_BASE_COMMANDS:
             result.error_msg = f"禁止执行命令：{base_cmd}（仅允许{ALLOWED_BASE_COMMANDS}）"
+            result.reward = failure_reward(result.error_msg)
             return result
 
         # 绑定对象必须是 *intensive 任务
         if base_cmd == "numactl" and not _is_intensive_command(cmd_parts):
             result.error_msg = "numactl 绑定的目标命令必须是 *intensive 二进制"
+            result.reward = failure_reward(result.error_msg)
             return result
 
         sample_pid: Optional[int] = None
@@ -851,9 +936,11 @@ def run_single_bind_command(command_str: str) -> BindCommandResult:
                     break
             if sample_pid is None:
                 result.error_msg = "taskset绑核缺少目标PID"
+                result.reward = failure_reward(result.error_msg)
                 return result
             if not _pid_is_intensive(sample_pid):
                 result.error_msg = f"PID {sample_pid} 不是 *intensive 结尾的任务，拒绝绑核"
+                result.reward = failure_reward(result.error_msg)
                 return result
 
         # reward baseline：先采一份“执行前”的最新 benchmark 日志
@@ -872,9 +959,30 @@ def run_single_bind_command(command_str: str) -> BindCommandResult:
         result.bind_success = True
         result.pid = sample_pid if sample_pid is not None else proc.pid
 
+        # taskset 属于短命令：等待其结束并检查退出码，失败则直接返回 reward=-1.0
+        if base_cmd == "taskset":
+            stdout_text, stderr_text = proc.communicate(timeout=5)
+            result.exit_code = proc.returncode if proc.returncode is not None else -1
+            if result.exit_code != 0:
+                result.bind_success = False
+                result.error_msg = (stderr_text or stdout_text or f"taskset 执行失败：exit_code={result.exit_code}").strip()
+                result.reward = failure_reward(result.error_msg)
+                return result
+
         # 运行1秒后采样
         time.sleep(1)
         result.sample_results = sample_process_state(result.pid or 0)
+
+        # 对于非 taskset 命令：若已退出且返回码非0，视为执行失败
+        proc.poll()
+        if proc.returncode is not None:
+            result.exit_code = proc.returncode
+            if proc.returncode != 0:
+                stdout_text, stderr_text = proc.communicate(timeout=2)
+                result.bind_success = False
+                result.error_msg = (stderr_text or stdout_text or f"{base_cmd} 执行失败：exit_code={proc.returncode}").strip()
+                result.reward = failure_reward(result.error_msg)
+                return result
 
         after_latest = {}
         if isinstance(result.sample_results, dict):
@@ -882,19 +990,14 @@ def run_single_bind_command(command_str: str) -> BindCommandResult:
         if isinstance(after_latest, dict):
             result.reward = compute_ops_change_rate_reward(before_latest, after_latest)
         else:
-            result.reward = {
-                "exit_code": -1,
-                "score": 0.0,
-                "stdout": "",
-                "per_pid_change_rate": {},
-                "before_ops_per_second": {},
-                "after_ops_per_second": {},
-                "stderr": "benchmark_latest 缺失，无法计算 reward",
-            }
+            result.reward = failure_reward("benchmark_latest 缺失，无法计算 reward")
 
-        result.exit_code = proc.returncode if proc else -1
+        if proc and proc.returncode is None:
+            result.exit_code = 0
     except Exception as e:
         result.error_msg = f"命令执行异常：{str(e)}\n{traceback.format_exc()}"
+        if result.reward is None:
+            result.reward = failure_reward(result.error_msg)
         if proc and proc.poll() is None:
             proc.kill()
     finally:
@@ -914,6 +1017,8 @@ def process_bind_task(task_params: Dict[str, Any]) -> BindTaskResult:
     try:
         for cmd in commands:
             single_result = run_single_bind_command(cmd)
+            if not single_result.bind_success and single_result.reward is None:
+                single_result.reward = failure_reward(single_result.error_msg or "命令执行失败")
             command_results.append(single_result)
             if not single_result.bind_success:
                 success = False
@@ -924,6 +1029,8 @@ def process_bind_task(task_params: Dict[str, Any]) -> BindTaskResult:
         error_msg = f"任务执行异常：{str(e)}\n{traceback.format_exc()}"
 
     task_reward = command_results[-1].reward if command_results else None
+    if not success:
+        task_reward = failure_reward(error_msg or "任务执行失败")
     return BindTaskResult(
         request_id=request_id,
         success=success,
@@ -1024,13 +1131,21 @@ async def query_bind_result(
         if request_id in completed_results:
             result = completed_results[request_id]
             result_dict = asdict(result)
+            reward_detail = result_dict.get("reward")
+            reward_score: float
+            if isinstance(reward_detail, dict) and isinstance(reward_detail.get("score"), (int, float)):
+                reward_score = float(reward_detail["score"])
+            else:
+                reward_score = -1.0
+            if not result.success:
+                reward_score = -1.0
             return JSONResponse(
                 status_code=200,
                 content={
                     "code": 200 if result.success else 500,
                     "msg": result.error_msg if result.error_msg else "任务执行完成",
                     "data": result_dict,
-                    "reward": result_dict.get("reward"),
+                    "reward": reward_score,
                 }
             )
 
