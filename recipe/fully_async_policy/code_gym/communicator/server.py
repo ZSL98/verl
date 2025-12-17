@@ -11,6 +11,7 @@ from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Optional, Any
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # 初始化FastAPI应用
 app = FastAPI(title="NUMA Bind Task Executor", version="1.0")
@@ -21,7 +22,7 @@ AUTH_API_KEY = "container-a-secure-key-2025"
 
 # 2. 安全配置：允许的基础命令（绑核/采样相关）
 ALLOWED_BASE_COMMANDS = {
-    "numactl", "ps", "lscpu", "perf", "taskset", "kill", "grep"
+    "numactl", "ps", "lscpu", "perf", "taskset", "kill", "grep", "top"
 }
 
 # 3. 任务队列（FIFO）+ 锁（保证线程安全）
@@ -39,7 +40,7 @@ CPU_LIST_PATTERN = re.compile(r"^\d+(,\d+)*(-\d+)*$")  # 支持1,2,3 或 0-7格�
 BENCHMARK_DIR = Path(__file__).resolve().parent.parent / "benchmarks"
 BENCHMARK_BIN_DIR = BENCHMARK_DIR / "cpubench"
 DISK_TEST_FILE = BENCHMARK_DIR / "disk_test.tmp"
-TEST_DURATION = 600
+TEST_DURATION = 1200
 LOAD_COUNT_RANGE: Dict[str, tuple] = {
     "compute": (1, 5),
     "mem": (1, 8),
@@ -73,6 +74,7 @@ class BindCommandResult:
     bind_success: bool
     sample_results: Dict[str, Any]
     exit_code: int
+    reward: Optional[Dict[str, Any]] = None
     error_msg: str = ""
 
 @dataclass
@@ -81,6 +83,7 @@ class BindTaskResult:
     request_id: str
     success: bool
     command_results: List[BindCommandResult]
+    reward: Optional[Dict[str, Any]] = None
     error_msg: str = ""
 
 
@@ -179,6 +182,221 @@ def get_tracked_pids() -> List[int]:
     with process_registry_lock:
         return list(tracked_processes.keys())
 
+def get_workload_processes() -> List[Dict[str, Any]]:
+    """返回由 server 启动的 benchmark 负载进程信息（PID/命令/来源）。"""
+    cleanup_finished_processes()
+    with process_registry_lock:
+        items = [
+            (pid, tracked)
+            for pid, tracked in tracked_processes.items()
+            if tracked.source.startswith("benchmark:")
+        ]
+    workloads: List[Dict[str, Any]] = []
+    for pid, tracked in sorted(items, key=lambda it: it[0]):
+        workloads.append(
+            {
+                "pid": pid,
+                "command": tracked.command,
+                "source": tracked.source,
+                "start_time": tracked.start_time,
+            }
+        )
+    return workloads
+
+
+def _parse_perf_stat_csv(stderr_text: str) -> Dict[str, Optional[float]]:
+    """解析 perf stat -x, 输出，返回 event_name -> value（无法解析则为 None / 缺失）"""
+    counters: Dict[str, Optional[float]] = {}
+    for line in stderr_text.splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 3:
+            continue
+        value_str, _, event_name = parts[0], parts[1], parts[2]
+        if not event_name or event_name == "time elapsed":
+            continue
+        if value_str.startswith("<") and value_str.endswith(">"):
+            counters[event_name] = None
+            continue
+        normalized = value_str.replace(",", "").strip()
+        try:
+            counters[event_name] = float(normalized)
+        except ValueError:
+            continue
+    return counters
+
+
+def _perf_sample_l3_hit_rate_for_pid(
+    pid: int,
+    sample_seconds: float,
+    loads_event: str,
+    misses_event: str,
+) -> Dict[str, Any]:
+    cmd = [
+        "perf",
+        "stat",
+        "-x",
+        ",",
+        "-e",
+        f"{loads_event},{misses_event}",
+        "-p",
+        str(pid),
+        "--",
+        "sleep",
+        str(sample_seconds),
+    ]
+    raw = execute_shell_command(cmd, timeout=max(6, int(sample_seconds) + 5))
+    counters = _parse_perf_stat_csv(raw.get("stderr", ""))
+    loads = counters.get(loads_event)
+    misses = counters.get(misses_event)
+    hit_rate: Optional[float] = None
+    if loads is not None and misses is not None and loads > 0:
+        hit_rate = max(0.0, min(1.0, (loads - misses) / loads))
+    return {
+        "exit_code": raw.get("exit_code", -2),
+        "loads_event": loads_event,
+        "misses_event": misses_event,
+        "loads": loads,
+        "misses": misses,
+        "hit_rate": hit_rate,
+        "stderr": raw.get("stderr", ""),
+    }
+
+
+def sample_workload_l3_hit_rate(
+    pids: List[int],
+    sample_seconds: float = 0.5,
+    max_workers: int = 6,
+) -> Dict[str, Any]:
+    """对每个 PID 使用 perf 采样 L3 命中率（hit_rate = 1 - misses / loads）。"""
+    if not pids:
+        return {
+            "exit_code": 0,
+            "results": {},
+            "loads_event": "LLC-loads",
+            "misses_event": "LLC-load-misses",
+            "stderr": "",
+        }
+
+    event_candidates = [
+        ("LLC-loads", "LLC-load-misses"),
+        ("cache-references", "cache-misses"),
+    ]
+    loads_event, misses_event = event_candidates[0]
+
+    # 先用首个PID探测一次事件是否可用；失败则回退到更通用的 cache-* 事件
+    probe = _perf_sample_l3_hit_rate_for_pid(pids[0], min(sample_seconds, 0.2), loads_event, misses_event)
+    if probe.get("exit_code") != 0 or probe.get("loads") is None or probe.get("misses") is None:
+        loads_event, misses_event = event_candidates[1]
+
+    results: Dict[str, Any] = {}
+    errors: List[str] = []
+    worker_count = max(1, min(max_workers, len(pids)))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        future_map = {
+            executor.submit(_perf_sample_l3_hit_rate_for_pid, pid, sample_seconds, loads_event, misses_event): pid
+            for pid in pids
+        }
+        for future in as_completed(future_map):
+            pid = future_map[future]
+            try:
+                results[str(pid)] = future.result()
+            except Exception as exc:
+                errors.append(f"PID {pid}: perf 采样失败：{exc}")
+                results[str(pid)] = {
+                    "exit_code": -2,
+                    "loads_event": loads_event,
+                    "misses_event": misses_event,
+                    "loads": None,
+                    "misses": None,
+                    "hit_rate": None,
+                    "stderr": str(exc),
+                }
+
+    return {
+        "exit_code": 0 if not errors else -1,
+        "loads_event": loads_event,
+        "misses_event": misses_event,
+        "results": results,
+        "stderr": "\n".join(errors),
+    }
+
+
+def _parse_top_cpu_percent(output_text: str) -> Dict[int, float]:
+    cpu_index: Optional[int] = None
+    cpu_by_pid: Dict[int, float] = {}
+
+    for line in output_text.splitlines():
+        stripped = line.lstrip()
+        if not stripped:
+            continue
+
+        if stripped.startswith("PID "):
+            cols = stripped.split()
+            if "%CPU" in cols:
+                cpu_index = cols.index("%CPU")
+            continue
+
+        if not stripped[0].isdigit():
+            continue
+
+        parts = stripped.split()
+        if not parts or not parts[0].isdigit():
+            continue
+        pid = int(parts[0])
+        idx = cpu_index if cpu_index is not None else 8
+        if len(parts) <= idx:
+            continue
+        try:
+            cpu_by_pid[pid] = float(parts[idx].replace("%", ""))
+        except ValueError:
+            continue
+
+    return cpu_by_pid
+
+
+def sample_workload_cpu_percent_top(
+    pids: List[int],
+    delay_seconds: float = 0.2,
+    iterations: int = 2,
+    chunk_size: int = 20,
+) -> Dict[str, Any]:
+    """使用 top 批量采样每个 PID 的 CPU 利用率（%CPU）。"""
+    if not pids:
+        return {"exit_code": 0, "cpu_percent": {}, "stderr": "", "stdout": ""}
+
+    cpu_percent: Dict[str, Optional[float]] = {str(pid): None for pid in pids}
+    errors: List[str] = []
+    raw_outputs: List[str] = []
+
+    for i in range(0, len(pids), chunk_size):
+        chunk = pids[i : i + chunk_size]
+        cmd = [
+            "top",
+            "-b",
+            "-n",
+            str(iterations),
+            "-d",
+            str(delay_seconds),
+            "-p",
+            ",".join(str(pid) for pid in chunk),
+        ]
+        raw = execute_shell_command(cmd, timeout=max(5, int(delay_seconds * iterations) + 3))
+        if raw.get("stdout"):
+            raw_outputs.append(raw["stdout"])
+        if raw.get("exit_code") != 0:
+            errors.append(raw.get("stderr", "") or f"top 采样失败：exit_code={raw.get('exit_code')}")
+            continue
+        parsed = _parse_top_cpu_percent(raw.get("stdout", ""))
+        for pid, value in parsed.items():
+            cpu_percent[str(pid)] = value
+
+    return {
+        "exit_code": 0 if not errors else -1,
+        "cpu_percent": cpu_percent,
+        "stderr": "\n".join(e for e in errors if e),
+        "stdout": "\n\n".join(raw_outputs[-1:]),
+    }
+
 
 def collect_latest_benchmark_samples(pids: Optional[List[int]] = None) -> Dict[str, Any]:
     """从临时文件读取每个进程最近一次benchmark采样日志"""
@@ -202,18 +420,83 @@ def collect_latest_benchmark_samples(pids: Optional[List[int]] = None) -> Dict[s
         "stderr": "\n".join(errors),
     }
 
+OPS_PER_SECOND_PATTERN = re.compile(
+    r"PID\s+(?P<pid>\d+):.*?Ops per second:\s*(?P<ops>[0-9]+(?:\.[0-9]+)?)",
+    re.IGNORECASE,
+)
+
+
+def parse_ops_per_second_from_benchmark_latest(latest_log: Dict[str, Any]) -> Dict[int, float]:
+    """解析 collect_latest_benchmark_samples 的 stdout，提取每个 PID 的 Ops per second。"""
+    stdout = str(latest_log.get("stdout", "") or "")
+    ops_by_pid: Dict[int, float] = {}
+    for line in stdout.splitlines():
+        m = OPS_PER_SECOND_PATTERN.search(line)
+        if not m:
+            continue
+        try:
+            pid = int(m.group("pid"))
+            ops = float(m.group("ops"))
+        except Exception:
+            continue
+        ops_by_pid[pid] = ops
+    return ops_by_pid
+
+
+def compute_ops_change_rate_reward(
+    before_latest: Dict[str, Any],
+    after_latest: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    reward 计算：
+    - 对每个 PID：change_rate = (after_ops - before_ops) / before_ops
+    - reward_score：所有有效 PID 的 change_rate 均值
+    """
+    before_ops = parse_ops_per_second_from_benchmark_latest(before_latest)
+    after_ops = parse_ops_per_second_from_benchmark_latest(after_latest)
+
+    per_pid_change_rate: Dict[str, Optional[float]] = {}
+    valid_rates: List[float] = []
+    stdout_lines: List[str] = []
+    for pid, after in after_ops.items():
+        before = before_ops.get(pid)
+        if before is None or before <= 0:
+            per_pid_change_rate[str(pid)] = None
+            stdout_lines.append(f"PID {pid}: before_ops=N/A after_ops={after} change_rate=N/A")
+            continue
+        rate = (after - before) / before
+        per_pid_change_rate[str(pid)] = rate
+        valid_rates.append(rate)
+        stdout_lines.append(f"PID {pid}: before_ops={before} after_ops={after} change_rate={rate}")
+
+    score = sum(valid_rates) / len(valid_rates) if valid_rates else 0.0
+    stderr_parts: List[str] = []
+    if not valid_rates:
+        stderr_parts.append("未找到可用于计算 reward 的有效 PID（缺少 before/after 或 before_ops<=0）")
+
+    return {
+        "exit_code": 0 if valid_rates else -1,
+        "score": score,
+        "stdout": "\n".join(stdout_lines + [f"mean_change_rate: {score}"]),
+        "per_pid_change_rate": per_pid_change_rate,
+        "before_ops_per_second": {str(pid): val for pid, val in before_ops.items()},
+        "after_ops_per_second": {str(pid): val for pid, val in after_ops.items()},
+        "stderr": "\n".join(stderr_parts),
+    }
+
 
 def collect_baseline_sample() -> Dict[str, Any]:
-    """采集当前机器的初始ps/lscpu/perf状态"""
+    """采集当前机器的初始 ps/lscpu + workload(pid) 维度的 perf/top 采样"""
+    workload_processes = get_workload_processes()
+    workload_pids = [item["pid"] for item in workload_processes]
     samples = {
         "ps_ef": execute_shell_command(["ps", "-ef"], timeout=5),
         "lscpu": execute_shell_command(["lscpu"], timeout=5),
-        "perf_stat": execute_shell_command(
-            ["perf", "stat", "sleep", "0.5"],
-            timeout=6
-        ),
+        "workload_processes": workload_processes,
+        "workload_l3_hit_rate": sample_workload_l3_hit_rate(workload_pids, sample_seconds=0.5),
+        "workload_cpu_percent": sample_workload_cpu_percent_top(workload_pids, delay_seconds=0.2, iterations=2),
     }
-    samples["benchmark_latest"] = collect_latest_benchmark_samples()
+    samples["benchmark_latest"] = collect_latest_benchmark_samples(workload_pids)
     return samples
 
 def _is_intensive_command(tokens: List[str]) -> bool:
@@ -516,15 +799,19 @@ def trigger_random_workload_async(source: str = "manual") -> List[int]:
 
 
 def sample_process_state(pid: int) -> Dict[str, Any]:
-    """采集指定进程的ps/lscpu/perf信息"""
+    """采集 ps/lscpu + workload(pid) 维度的 perf/top 采样"""
     samples: Dict[str, Any] = {}
 
-    # 与基线采样保持一致：全量ps/lscpu/perf
+    # 与基线采样保持一致：全量ps/lscpu + per-pid perf/top
     samples["ps_ef"] = execute_shell_command(["ps", "-ef"], timeout=5)
     samples["lscpu"] = execute_shell_command(["lscpu"], timeout=5)
-    samples["perf_stat"] = execute_shell_command(["perf", "stat", "sleep", "0.5"], timeout=6)
+    workload_processes = get_workload_processes()
+    workload_pids = [item["pid"] for item in workload_processes]
+    samples["workload_processes"] = workload_processes
+    samples["workload_l3_hit_rate"] = sample_workload_l3_hit_rate(workload_pids, sample_seconds=0.5)
+    samples["workload_cpu_percent"] = sample_workload_cpu_percent_top(workload_pids, delay_seconds=0.2, iterations=2)
     # 返回所有负载进程的最新采样日志，而非仅目标PID
-    samples["benchmark_latest"] = collect_latest_benchmark_samples()
+    samples["benchmark_latest"] = collect_latest_benchmark_samples(workload_pids)
     return samples
 
 
@@ -536,6 +823,7 @@ def run_single_bind_command(command_str: str) -> BindCommandResult:
         bind_success=False,
         sample_results={},
         exit_code=-1,
+        reward=None,
         error_msg=""
     )
     proc: Optional[subprocess.Popen] = None
@@ -568,6 +856,11 @@ def run_single_bind_command(command_str: str) -> BindCommandResult:
                 result.error_msg = f"PID {sample_pid} 不是 *intensive 结尾的任务，拒绝绑核"
                 return result
 
+        # reward baseline：先采一份“执行前”的最新 benchmark 日志
+        workload_processes = get_workload_processes()
+        workload_pids = [item["pid"] for item in workload_processes]
+        before_latest = collect_latest_benchmark_samples(workload_pids)
+
         proc = subprocess.Popen(
             cmd_parts,
             stdout=subprocess.PIPE,
@@ -581,15 +874,22 @@ def run_single_bind_command(command_str: str) -> BindCommandResult:
 
         # 运行1秒后采样
         time.sleep(1)
-        target_pid = result.pid
-        if target_pid and (proc.poll() is None or base_cmd == "taskset"):
-            result.sample_results = sample_process_state(target_pid)
+        result.sample_results = sample_process_state(result.pid or 0)
+
+        after_latest = {}
+        if isinstance(result.sample_results, dict):
+            after_latest = result.sample_results.get("benchmark_latest", {}) or {}
+        if isinstance(after_latest, dict):
+            result.reward = compute_ops_change_rate_reward(before_latest, after_latest)
         else:
-            result.sample_results = {
-                "ps_ef": {"exit_code": -1, "stdout": "", "stderr": "目标进程已退出，无法采样"},
-                "lscpu": execute_shell_command(["lscpu"], timeout=5),
-                "perf_stat": {"exit_code": -1, "stdout": "", "stderr": "目标进程已退出，无法采样"},
-                "benchmark_latest": collect_latest_benchmark_samples(),
+            result.reward = {
+                "exit_code": -1,
+                "score": 0.0,
+                "stdout": "",
+                "per_pid_change_rate": {},
+                "before_ops_per_second": {},
+                "after_ops_per_second": {},
+                "stderr": "benchmark_latest 缺失，无法计算 reward",
             }
 
         result.exit_code = proc.returncode if proc else -1
@@ -623,10 +923,12 @@ def process_bind_task(task_params: Dict[str, Any]) -> BindTaskResult:
         success = False
         error_msg = f"任务执行异常：{str(e)}\n{traceback.format_exc()}"
 
+    task_reward = command_results[-1].reward if command_results else None
     return BindTaskResult(
         request_id=request_id,
         success=success,
         command_results=command_results,
+        reward=task_reward,
         error_msg=error_msg
     )
 
@@ -678,6 +980,7 @@ async def submit_bind_tasks(
         raise HTTPException(status_code=401, detail="未授权：API Key错误")
 
     if not bind_commands:
+        print("bind_commands不能为空")
         raise HTTPException(status_code=400, detail="bind_commands不能为空")
 
     with queue_lock:
@@ -687,6 +990,7 @@ async def submit_bind_tasks(
             or request_id in processing_requests
         )
         if duplicate:
+            print(f"请求ID{request_id}已存在，请勿重复提交")
             raise HTTPException(status_code=400, detail=f"请求ID{request_id}已存在，请勿重复提交")
 
         task_queue.append({"request_id": request_id, "bind_commands": bind_commands})
@@ -725,7 +1029,8 @@ async def query_bind_result(
                 content={
                     "code": 200 if result.success else 500,
                     "msg": result.error_msg if result.error_msg else "任务执行完成",
-                    "data": result_dict
+                    "data": result_dict,
+                    "reward": result_dict.get("reward"),
                 }
             )
 
@@ -776,7 +1081,7 @@ async def start_random_workload(
         raise HTTPException(status_code=401, detail="未授权：API Key错误")
 
     pids = trigger_random_workload_async(source="api")
-    pid_msg = "pids:" + ",".join(str(pid) for pid in pids)
+    pid_msg = ",".join(str(pid) for pid in pids)
     return JSONResponse(
         status_code=200,
         content={
@@ -789,7 +1094,7 @@ async def start_random_workload(
 async def baseline_sample(
     x_api_key: str = Header(None, description="API鉴权Key")
 ):
-    """返回当前机器的初始ps/lscpu/perf采样结果"""
+    """返回当前机器的初始 ps/lscpu + workload(pid) 维度的 perf/top 采样结果"""
     if x_api_key != AUTH_API_KEY:
         raise HTTPException(status_code=401, detail="未授权：API Key错误")
     samples = collect_baseline_sample()

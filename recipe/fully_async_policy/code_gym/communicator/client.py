@@ -1,4 +1,5 @@
 import random
+import shlex
 import threading
 import time
 import uuid
@@ -134,13 +135,50 @@ class CodeGymClient:
     def print_sample_results(self, title: str, samples: Dict[str, Any]) -> None:
         print(f"\n=== {title} ===")
         for name, result in samples.items():
-            print(f"[{name}] exit_code={result.get('exit_code')}")
-            stdout = result.get("stdout", "")
-            stderr = result.get("stderr", "")
-            if stdout:
-                print(f"stdout:\n{stdout}")
-            if stderr:
-                print(f"stderr:\n{stderr}")
+            if name == "workload_processes" and isinstance(result, list):
+                print(f"[{name}] count={len(result)}")
+                for item in result:
+                    pid = item.get("pid")
+                    source = item.get("source", "")
+                    command = item.get("command", "")
+                    print(f"  - pid={pid} source={source} cmd={command}")
+                continue
+
+            if name == "workload_l3_hit_rate" and isinstance(result, dict):
+                print(f"[{name}] exit_code={result.get('exit_code')} loads={result.get('loads_event')} misses={result.get('misses_event')}")
+                results = result.get("results", {}) or {}
+                for pid, metrics in sorted(results.items(), key=lambda it: int(it[0]) if str(it[0]).isdigit() else str(it[0])):
+                    hit_rate = metrics.get("hit_rate")
+                    loads = metrics.get("loads")
+                    misses = metrics.get("misses")
+                    exit_code = metrics.get("exit_code")
+                    print(f"  - pid={pid} hit_rate={hit_rate} loads={loads} misses={misses} exit_code={exit_code}")
+                stderr = result.get("stderr", "")
+                if stderr:
+                    print(f"stderr:\n{stderr}")
+                continue
+
+            if name == "workload_cpu_percent" and isinstance(result, dict):
+                print(f"[{name}] exit_code={result.get('exit_code')}")
+                cpu_percent = result.get("cpu_percent", {}) or {}
+                for pid, value in sorted(cpu_percent.items(), key=lambda it: int(it[0]) if str(it[0]).isdigit() else str(it[0])):
+                    print(f"  - pid={pid} cpu_percent={value}")
+                stderr = result.get("stderr", "")
+                if stderr:
+                    print(f"stderr:\n{stderr}")
+                continue
+
+            if isinstance(result, dict) and {"exit_code", "stdout", "stderr"}.issubset(result.keys()):
+                print(f"[{name}] exit_code={result.get('exit_code')}")
+                stdout = result.get("stdout", "")
+                stderr = result.get("stderr", "")
+                if stdout:
+                    print(f"stdout:\n{stdout}")
+                if stderr:
+                    print(f"stderr:\n{stderr}")
+                continue
+
+            print(f"[{name}] {result}")
 
     def pick_intensive_pid_from_ps(self, ps_stdout: str) -> int:
         """从ps -ef输出中随机挑选一个 *intensive 结尾的进程PID"""
@@ -160,6 +198,26 @@ class CodeGymClient:
             raise RuntimeError("未找到 *intensive 结尾的进程供绑核")
         return random.choice(candidates)
 
+    def pick_intensive_pid_from_workloads(self, workload_processes: List[Dict[str, Any]]) -> int:
+        """从 server 返回的 workload_processes 中挑选一个 *intensive 结尾的进程PID"""
+        candidates: List[int] = []
+        for item in workload_processes:
+            pid = item.get("pid")
+            cmd = str(item.get("command", ""))
+            try:
+                pid_int = int(pid)
+            except Exception:
+                continue
+            try:
+                parts = shlex.split(cmd)
+            except Exception:
+                parts = cmd.split()
+            if any(Path(part).name.endswith("intensive") for part in parts):
+                candidates.append(pid_int)
+        if not candidates:
+            raise RuntimeError("workload_processes 中未找到 *intensive 结尾的进程供绑核")
+        return random.choice(candidates)
+
 
 def main() -> None:
     """
@@ -175,12 +233,16 @@ def main() -> None:
     if baseline.get("data"):
         client.print_sample_results("初始状态", baseline["data"])
 
-    ps_stdout = baseline.get("data", {}).get("ps_ef", {}).get("stdout", "")
     try:
-        target_pid = client.pick_intensive_pid_from_ps(ps_stdout)
+        workload_processes = baseline.get("data", {}).get("workload_processes", []) or []
+        target_pid = client.pick_intensive_pid_from_workloads(workload_processes)
     except RuntimeError as exc:
-        print(f"选取目标PID失败：{exc}")
-        return
+        ps_stdout = baseline.get("data", {}).get("ps_ef", {}).get("stdout", "")
+        try:
+            target_pid = client.pick_intensive_pid_from_ps(ps_stdout)
+        except RuntimeError as ps_exc:
+            print(f"选取目标PID失败：{exc}; ps 回退也失败：{ps_exc}")
+            return
     print(f"\n选中的目标PID：{target_pid}")
 
     request_id = f"client-{uuid.uuid4()}"
@@ -195,11 +257,22 @@ def main() -> None:
         if code in (200, 500):
             print(f"\n查询结果：code={code} msg={query_resp.get('msg')}")
             data = query_resp.get("data", {}) or {}
+            if data.get("reward") is not None:
+                reward = data.get("reward") or {}
+                print(f"\nreward_score={reward.get('score')} exit_code={reward.get('exit_code')}")
+                if reward.get("stderr"):
+                    print(f"reward_stderr:\n{reward.get('stderr')}")
             for idx, cmd_result in enumerate(data.get("command_results", []), start=1):
                 print(f"\n--- 指令 {idx}: {cmd_result.get('command')} ---")
                 print(f"bind_success={cmd_result.get('bind_success')}, exit_code={cmd_result.get('exit_code')}")
+                if cmd_result.get("reward") is not None:
+                    cmd_reward = cmd_result.get("reward") or {}
+                    print(f"cmd_reward_score={cmd_reward.get('score')} exit_code={cmd_reward.get('exit_code')}")
                 client.print_sample_results("采样结果", cmd_result.get("sample_results", {}))
             break
         print(f"任务未完成，继续等待... (status code={code})")
     else:
         print("查询超时，未获取到结果")
+
+if __name__ == "__main__":
+    main()
