@@ -1,9 +1,7 @@
 import random
-import shlex
 import threading
 import time
 import uuid
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -53,6 +51,9 @@ class CodeGymClient:
                 }
             )
             self.health_timeout = health_timeout
+            self._workload_pid_lock = threading.Lock()
+            self._latest_started_workload_pids: List[int] = []
+            self._latest_seen_workload_pids: List[int] = []
             self._ensure_server_ready()
             self._initialized = True
 
@@ -91,7 +92,6 @@ class CodeGymClient:
         return dict(self.session.headers)
 
     def _ensure_server_ready(self) -> None:
-        """调用 /health 接口，确保 server.py 已经启动并可访问。"""
         health_url = f"{self.server_base_url}/health"
         try:
             resp = self.session.get(health_url, timeout=self.health_timeout)
@@ -102,13 +102,18 @@ class CodeGymClient:
             ) from exc
 
     def fetch_baseline_sample(self) -> Dict[str, Any]:
-        """从server获取初始状态的ps/lscpu/perf结果，以及benchmark最新采样日志"""
         url = f"{self.server_base_url}/baseline-sample"
         resp = self.session.get(url, headers=self._headers(), timeout=20)
-        return resp.json()
+        payload: Dict[str, Any] = resp.json()
+        if payload.get("code") == 200:
+            data = payload.get("data", {}) or {}
+            workload_processes = data.get("workload_processes", []) or []
+            pids = self._parse_workload_pids(workload_processes)
+            with self._workload_pid_lock:
+                self._latest_seen_workload_pids = pids
+        return payload
 
     def submit_bind_task(self, request_id: str, commands: List[str]) -> Dict[str, Any]:
-        """提交绑核指令序列"""
         url = f"{self.server_base_url}/bind-tasks"
         payload = {"request_id": request_id, "bind_commands": commands}
         resp = self.session.post(url, json=payload, headers=self._headers(), timeout=20)
@@ -124,13 +129,72 @@ class CodeGymClient:
         """请求server终止其已记录的运行进程"""
         url = f"{self.server_base_url}/stop-all-processes"
         resp = self.session.post(url, headers=self._headers(), timeout=10)
-        return resp.json()
+        payload: Dict[str, Any] = resp.json()
+        if payload.get("code") == 200:
+            with self._workload_pid_lock:
+                self._latest_started_workload_pids = []
+                self._latest_seen_workload_pids = []
+        return payload
 
     def start_random_workload(self) -> Dict[str, Any]:
         """请求server再启动一批随机benchmark负载（与启动时配置一致）"""
         url = f"{self.server_base_url}/start-random-workload"
         resp = self.session.post(url, headers=self._headers(), timeout=10)
-        return resp.json()
+        payload: Dict[str, Any] = resp.json()
+        if payload.get("code") == 200:
+            pid_msg = str(payload.get("msg", "") or "")
+            pids = self._parse_pid_msg(pid_msg)
+            with self._workload_pid_lock:
+                self._latest_started_workload_pids = pids
+            data = payload.get("data")
+            if not isinstance(data, dict):
+                data = {}
+                payload["data"] = data
+            data["pids"] = pids
+        return payload
+
+    def _parse_pid_msg(self, pid_msg: str) -> List[int]:
+        pids: List[int] = []
+        if not pid_msg:
+            return pids
+        for part in pid_msg.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                pids.append(int(part))
+            except ValueError:
+                continue
+        return list(dict.fromkeys(pids))
+
+    def _parse_workload_pids(self, workload_processes: Any) -> List[int]:
+        if not isinstance(workload_processes, list):
+            return []
+        pids: List[int] = []
+        for item in workload_processes:
+            if not isinstance(item, dict):
+                continue
+            pid = item.get("pid")
+            try:
+                pids.append(int(pid))
+            except (TypeError, ValueError):
+                continue
+        return list(dict.fromkeys(pids))
+
+    def get_tracked_workload_pids(self) -> List[int]:
+        with self._workload_pid_lock:
+            pids = self._latest_seen_workload_pids + self._latest_started_workload_pids
+        return list(dict.fromkeys(pids))
+
+    def pick_random_workload_pid(self, workload_processes: Optional[List[Dict[str, Any]]] = None) -> int:
+        """随机挑选一个由 server 启动的 workload PID。"""
+        if workload_processes is not None:
+            candidates = self._parse_workload_pids(workload_processes)
+        else:
+            candidates = self.get_tracked_workload_pids()
+        if not candidates:
+            raise RuntimeError("未找到可用的 workload 进程 PID 供绑核（请先确保 server 已启动负载）")
+        return random.choice(candidates)
 
     def print_sample_results(self, title: str, samples: Dict[str, Any]) -> None:
         print(f"\n=== {title} ===")
@@ -185,50 +249,11 @@ class CodeGymClient:
 
             print(f"[{name}] {result}")
 
-    def pick_intensive_pid_from_ps(self, ps_stdout: str) -> int:
-        """从ps -ef输出中随机挑选一个 *intensive 结尾的进程PID"""
-        candidates = []
-        for line in ps_stdout.splitlines():
-            tokens = line.split(None, 7)
-            if len(tokens) < 8:
-                continue
-            pid_str = tokens[1]
-            cmd = tokens[7]
-            if not pid_str.isdigit():
-                continue
-            cmd_parts = cmd.split()
-            if any(Path(part).name.endswith("intensive") for part in cmd_parts):
-                candidates.append(int(pid_str))
-        if not candidates:
-            raise RuntimeError("未找到 *intensive 结尾的进程供绑核")
-        return random.choice(candidates)
-
-    def pick_intensive_pid_from_workloads(self, workload_processes: List[Dict[str, Any]]) -> int:
-        """从 server 返回的 workload_processes 中挑选一个 *intensive 结尾的进程PID"""
-        candidates: List[int] = []
-        for item in workload_processes:
-            pid = item.get("pid")
-            cmd = str(item.get("command", ""))
-            try:
-                pid_int = int(pid)
-            except Exception:
-                continue
-            try:
-                parts = shlex.split(cmd)
-            except Exception:
-                parts = cmd.split()
-            if any(Path(part).name.endswith("intensive") for part in parts):
-                candidates.append(pid_int)
-        if not candidates:
-            raise RuntimeError("workload_processes 中未找到 *intensive 结尾的进程供绑核")
-        return random.choice(candidates)
-
-
 def main() -> None:
     """
     执行示例流程：
     1) 采集基线 ps/lscpu/perf 结果并打印
-    2) 从 ps -ef 输出中挑选一个 *intensive 进程，生成 taskset 绑核指令
+    2) 从 server 返回的 workload_processes 中随机挑选一个负载进程PID，生成 taskset 绑核指令
     3) 提交绑核任务并轮询查询结果，最终打印采样输出
     """
     client = CodeGymClient()
@@ -240,14 +265,10 @@ def main() -> None:
 
     try:
         workload_processes = baseline.get("data", {}).get("workload_processes", []) or []
-        target_pid = client.pick_intensive_pid_from_workloads(workload_processes)
+        target_pid = client.pick_random_workload_pid(workload_processes)
     except RuntimeError as exc:
-        ps_stdout = baseline.get("data", {}).get("ps_ef", {}).get("stdout", "")
-        try:
-            target_pid = client.pick_intensive_pid_from_ps(ps_stdout)
-        except RuntimeError as ps_exc:
-            print(f"选取目标PID失败：{exc}; ps 回退也失败：{ps_exc}")
-            return
+        print(f"选取目标PID失败：{exc}")
+        return
     print(f"\n选中的目标PID：{target_pid}")
 
     request_id = f"client-{uuid.uuid4()}"
