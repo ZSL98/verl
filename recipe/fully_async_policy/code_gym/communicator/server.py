@@ -71,6 +71,27 @@ CODEGYM_SAMPLE_DIR = Path(os.environ.get("CODEGYM_SAMPLE_DIR", "/tmp/codegym_sam
 CODEGYM_SAMPLE_PREFIX = "sample_"
 CODEGYM_SAMPLE_SUFFIX = ".log"
 
+# ======================== 采样性能配置（单条采样 <1s） ========================
+# 默认对单条采样做“快速模式”：减少 ps 输出体积、缓存 lscpu、缩短 perf/top 采样窗口。
+CODEGYM_FAST_SAMPLE = os.environ.get("CODEGYM_FAST_SAMPLE", "1").strip().lower() not in {"0", "false", "no"}
+CODEGYM_PS_FULL_OUTPUT = os.environ.get("CODEGYM_PS_FULL_OUTPUT", "0").strip().lower() in {"1", "true", "yes"}
+LSCPU_CACHE_TTL_SECONDS = float(os.environ.get("CODEGYM_LSCPU_CACHE_TTL_SECONDS", "60"))
+
+# perf/top 快速采样参数（可用环境变量覆盖）
+FAST_PERF_SAMPLE_SECONDS = float(os.environ.get("CODEGYM_FAST_PERF_SAMPLE_SECONDS", "0.1"))
+FAST_PERF_MAX_WORKERS = int(os.environ.get("CODEGYM_FAST_PERF_MAX_WORKERS", "16"))
+FAST_PERF_MAX_ATTEMPTS = int(os.environ.get("CODEGYM_FAST_PERF_MAX_ATTEMPTS", "1"))
+FAST_TOP_DELAY_SECONDS = float(os.environ.get("CODEGYM_FAST_TOP_DELAY_SECONDS", "0.1"))
+FAST_TOP_ITERATIONS = int(os.environ.get("CODEGYM_FAST_TOP_ITERATIONS", "1"))
+FAST_TOP_CHUNK_SIZE = int(os.environ.get("CODEGYM_FAST_TOP_CHUNK_SIZE", "256"))
+
+# lscpu/perf 事件探测缓存
+_LSCPU_CACHE: Optional[Dict[str, Any]] = None
+_LSCPU_CACHE_TS: float = 0.0
+_LSCPU_CACHE_LOCK = threading.Lock()
+_PERF_EVENT_PAIR: Optional[tuple[str, str]] = None
+_PERF_EVENT_PAIR_LOCK = threading.Lock()
+
 # ======================== 数据结构定义 ========================
 @dataclass
 class BindCommandResult:
@@ -178,6 +199,42 @@ def execute_shell_command(cmd_parts: List[str], timeout: int = 10) -> Dict[str, 
             "stdout": "",
             "stderr": f"命令执行失败：{str(e)}"
         }
+
+
+def get_lscpu_cached() -> Dict[str, Any]:
+    """获取（并缓存）lscpu 输出，避免每次采样都重复执行。"""
+    global _LSCPU_CACHE, _LSCPU_CACHE_TS
+    now = time.time()
+    with _LSCPU_CACHE_LOCK:
+        if _LSCPU_CACHE is not None and (now - _LSCPU_CACHE_TS) < LSCPU_CACHE_TTL_SECONDS:
+            return _LSCPU_CACHE
+    raw = execute_shell_command(["lscpu"], timeout=5)
+    with _LSCPU_CACHE_LOCK:
+        _LSCPU_CACHE = raw
+        _LSCPU_CACHE_TS = now
+    return raw
+
+
+def _ps_snapshot_for_pids(pids: List[int]) -> Dict[str, Any]:
+    """
+    获取指定 PID 列表的 ps 快照（更小的输出体积，序列化更快）。
+    尽量包含 psr(当前运行CPU核) 字段；不支持时自动回退。
+    """
+    if not pids:
+        return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+    pid_list = ",".join(str(pid) for pid in pids)
+    candidates = [
+        ["ps", "-o", "pid,ppid,psr,pcpu,pmem,args", "-p", pid_list],
+        ["ps", "-o", "pid,ppid,pcpu,pmem,args", "-p", pid_list],
+        ["ps", "-o", "pid,ppid,pcpu,pmem,comm", "-p", pid_list],
+    ]
+    for cmd in candidates:
+        raw = execute_shell_command(cmd, timeout=3)
+        if raw.get("exit_code") == 0:
+            return raw
+
+    return execute_shell_command(["ps", "-ef"], timeout=5)
 
 def _sample_file_for_pid(pid: int) -> Path:
     return CODEGYM_SAMPLE_DIR / f"{CODEGYM_SAMPLE_PREFIX}{pid}{CODEGYM_SAMPLE_SUFFIX}"
@@ -342,8 +399,10 @@ def sample_workload_l3_hit_rate(
     pids: List[int],
     sample_seconds: float = 0.5,
     max_workers: int = 6,
+    max_attempts: int = 3,
 ) -> Dict[str, Any]:
     """对每个 PID 使用 perf 采样 L3 命中率（hit_rate = 1 - misses / loads）。"""
+    global _PERF_EVENT_PAIR
     if not pids:
         return {
             "exit_code": 0,
@@ -353,23 +412,40 @@ def sample_workload_l3_hit_rate(
             "stderr": "",
         }
 
-    event_candidates = [
-        ("LLC-loads", "LLC-load-misses"),
-        ("cache-references", "cache-misses"),
-    ]
-    loads_event, misses_event = event_candidates[0]
+    # perf 事件对当前机器通常是静态的：缓存一次探测结果，避免每次采样额外跑一次 perf。
+    with _PERF_EVENT_PAIR_LOCK:
+        cached = _PERF_EVENT_PAIR
+    if cached is not None:
+        loads_event, misses_event = cached
+    else:
+        event_candidates = [
+            ("LLC-loads", "LLC-load-misses"),
+            ("cache-references", "cache-misses"),
+        ]
+        loads_event, misses_event = event_candidates[0]
 
-    # 先用首个PID探测一次事件是否可用；仅当明确“不支持”时回退到更通用的 cache-* 事件
-    probe = _perf_sample_l3_hit_rate_for_pid(pids[0], min(sample_seconds, 0.2), loads_event, misses_event)
-    if _perf_output_indicates_unsupported(str(probe.get("stderr", "") or "")):
-        loads_event, misses_event = event_candidates[1]
+        # 先用首个PID探测一次事件是否可用；仅当明确“不支持”时回退到更通用的 cache-* 事件
+        probe_seconds = min(sample_seconds, 0.05)
+        probe = _perf_sample_l3_hit_rate_for_pid(pids[0], probe_seconds, loads_event, misses_event)
+        if _perf_output_indicates_unsupported(str(probe.get("stderr", "") or "")):
+            loads_event, misses_event = event_candidates[1]
+
+        with _PERF_EVENT_PAIR_LOCK:
+            _PERF_EVENT_PAIR = (loads_event, misses_event)
 
     results: Dict[str, Any] = {}
     errors: List[str] = []
     worker_count = max(1, min(max_workers, len(pids)))
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         future_map = {
-            executor.submit(_perf_sample_l3_hit_rate_for_pid_with_retry, pid, sample_seconds, loads_event, misses_event): pid
+            executor.submit(
+                _perf_sample_l3_hit_rate_for_pid_with_retry,
+                pid,
+                sample_seconds,
+                loads_event,
+                misses_event,
+                max_attempts,
+            ): pid
             for pid in pids
         }
         for future in as_completed(future_map):
@@ -396,6 +472,75 @@ def sample_workload_l3_hit_rate(
         "stderr": "\n".join(errors),
     }
 
+
+def _parse_ps_cpu_percent(output_text: str) -> Dict[int, float]:
+    cpu_by_pid: Dict[int, float] = {}
+    for line in output_text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.lower().startswith("pid"):
+            continue
+        parts = stripped.split()
+        if len(parts) < 2 or not parts[0].isdigit():
+            continue
+        try:
+            pid = int(parts[0])
+            cpu_by_pid[pid] = float(parts[1])
+        except ValueError:
+            continue
+    return cpu_by_pid
+
+
+def sample_workload_cpu_percent_ps(pids: List[int]) -> Dict[str, Any]:
+    """使用 ps 快速采样每个 PID 的 CPU 利用率（%CPU）。"""
+    if not pids:
+        return {"exit_code": 0, "cpu_percent": {}, "stderr": "", "stdout": ""}
+
+    cpu_percent: Dict[str, Optional[float]] = {str(pid): None for pid in pids}
+    cmd = ["ps", "-o", "pid,pcpu", "-p", ",".join(str(pid) for pid in pids)]
+    raw = execute_shell_command(cmd, timeout=3)
+    if raw.get("exit_code") != 0:
+        return {
+            "exit_code": raw.get("exit_code", -1),
+            "cpu_percent": cpu_percent,
+            "stderr": raw.get("stderr", ""),
+            "stdout": raw.get("stdout", ""),
+        }
+
+    parsed = _parse_ps_cpu_percent(raw.get("stdout", ""))
+    for pid, value in parsed.items():
+        cpu_percent[str(pid)] = value
+
+    return {
+        "exit_code": 0,
+        "cpu_percent": cpu_percent,
+        "stderr": "",
+        "stdout": raw.get("stdout", ""),
+    }
+
+
+def sample_workload_cpu_percent(
+    pids: List[int],
+    *,
+    prefer: str = "ps",
+    delay_seconds: float = 0.2,
+    iterations: int = 2,
+    chunk_size: int = 20,
+) -> Dict[str, Any]:
+    """
+    采样每个 PID 的 CPU 利用率（%CPU）。
+    默认优先使用 ps（更快），失败时回退到 top。
+    """
+    mode = (prefer or "ps").strip().lower()
+    if mode != "top":
+        ps_result = sample_workload_cpu_percent_ps(pids)
+        if ps_result.get("exit_code") == 0:
+            return ps_result
+    return sample_workload_cpu_percent_top(
+        pids,
+        delay_seconds=delay_seconds,
+        iterations=iterations,
+        chunk_size=chunk_size,
+    )
 
 def _parse_top_cpu_percent(output_text: str) -> Dict[int, float]:
     cpu_index: Optional[int] = None
@@ -888,14 +1033,47 @@ def sample_process_state(pid: int) -> Dict[str, Any]:
     """采集 ps/lscpu + workload(pid) 维度的 perf/top 采样"""
     samples: Dict[str, Any] = {}
 
-    # 与基线采样保持一致：全量ps/lscpu + per-pid perf/top
-    samples["ps_ef"] = execute_shell_command(["ps", "-ef"], timeout=5)
-    samples["lscpu"] = execute_shell_command(["lscpu"], timeout=5)
     workload_processes = get_workload_processes()
     workload_pids = [item["pid"] for item in workload_processes]
     samples["workload_processes"] = workload_processes
-    samples["workload_l3_hit_rate"] = sample_workload_l3_hit_rate(workload_pids, sample_seconds=0.2)
-    samples["workload_cpu_percent"] = sample_workload_cpu_percent_top(workload_pids, delay_seconds=0.2, iterations=2)
+
+    # 单次采样需尽量控制在 <1s：默认启用快速模式（可通过环境变量关闭/调整）。
+    if CODEGYM_FAST_SAMPLE:
+        samples["ps_ef"] = (
+            execute_shell_command(["ps", "-ef"], timeout=5)
+            if CODEGYM_PS_FULL_OUTPUT
+            else _ps_snapshot_for_pids(workload_pids)
+        )
+        samples["lscpu"] = get_lscpu_cached()
+        samples["workload_l3_hit_rate"] = sample_workload_l3_hit_rate(
+            workload_pids,
+            sample_seconds=FAST_PERF_SAMPLE_SECONDS,
+            max_workers=FAST_PERF_MAX_WORKERS,
+            max_attempts=FAST_PERF_MAX_ATTEMPTS,
+        )
+        samples["workload_cpu_percent"] = sample_workload_cpu_percent(
+            workload_pids,
+            prefer="ps",
+            delay_seconds=FAST_TOP_DELAY_SECONDS,
+            iterations=FAST_TOP_ITERATIONS,
+            chunk_size=FAST_TOP_CHUNK_SIZE,
+        )
+    else:
+        # 与基线采样保持一致：全量ps/lscpu + per-pid perf/top
+        samples["ps_ef"] = execute_shell_command(["ps", "-ef"], timeout=5)
+        samples["lscpu"] = execute_shell_command(["lscpu"], timeout=5)
+        samples["workload_l3_hit_rate"] = sample_workload_l3_hit_rate(
+            workload_pids,
+            sample_seconds=0.2,
+            max_workers=6,
+            max_attempts=3,
+        )
+        samples["workload_cpu_percent"] = sample_workload_cpu_percent_top(
+            workload_pids,
+            delay_seconds=0.2,
+            iterations=2,
+            chunk_size=20,
+        )
     # 返回所有负载进程的最新采样日志，而非仅目标PID
     samples["benchmark_latest"] = collect_latest_benchmark_samples(workload_pids)
     return samples
