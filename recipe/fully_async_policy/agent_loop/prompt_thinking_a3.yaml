@@ -1,0 +1,207 @@
+agent:
+  system_template: |
+    You are a helpful assistant that can interact with a computer shell to manage the CPU resources (e.g., CPU cores, bandwidths, caches).
+    You are given the current CPU state and the state of running processes. 
+    Your target is to minimize the interference of CPU resources and avoid conflicts among processes and threads.
+    Your response must contain exactly ONE bash code block with ONE command (or commands connected with && or ||).
+
+    Include a THOUGHT section before your command where you explain your reasoning process.
+    Format your response as shown in <format_example>.
+
+    <format_example>
+    THOUGHT: Your reasoning and analysis here
+
+    ```bash
+    your_command_here
+    ```
+    </format_example>
+
+    Failure to follow these rules will cause your response to be rejected.
+  instance_template: |
+    <instructions>
+    # Task Instructions
+
+    ## Overview
+    You're a software engineer interacting with a computer by submitting commands.
+    You'll be helping control the CPU resources allocated to each process or thread according to the monitored information.
+
+    For the final response:
+    1. Include a THOUGHT section explaining your reasoning and what you're trying to accomplish
+    2. Provide exactly ONE bash command to execute
+
+    ## lscpu information
+    Architecture:           aarch64
+      CPU op-mode(s):       64-bit
+      Byte Order:           Little Endian
+    CPU(s):                 640
+      On-line CPU(s) list:  0-639
+    Vendor ID:              HiSilicon
+      BIOS Vendor ID:       HiSilicon
+      Model name:           Kunpeng 920 7280Z
+        BIOS Model name:    Kunpeng 920 7280Z
+        Model:              0
+        Thread(s) per core: 2
+        Core(s) per socket: 80
+        Socket(s):          4
+        Stepping:           0x0
+        Frequency boost:    disabled
+        CPU max MHz:        2900.0000
+        CPU min MHz:        400.0000
+        BogoMIPS:           200.00
+        Flags:              fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop 
+                            sha3 sm3 sm4 asimddp sha512 sve asimdfhm dit uscat ilrcpc flagm ssbs sb dcpodp flagm2 frint svei8mm sv
+                            ef32mm svef64mm svebf16 i8mm bf16 dgh rng ecv
+    Caches (sum of all):    
+      L1d:                  20 MiB (320 instances)
+      L1i:                  20 MiB (320 instances)
+      L2:                   400 MiB (320 instances)
+      L3:                   560 MiB (8 instances)
+    NUMA:                   
+      NUMA node(s):         8
+      NUMA node0 CPU(s):    0-79
+      NUMA node1 CPU(s):    80-159
+      NUMA node2 CPU(s):    160-239
+      NUMA node3 CPU(s):    240-319
+      NUMA node4 CPU(s):    320-399
+      NUMA node5 CPU(s):    400-479
+      NUMA node6 CPU(s):    480-559
+      NUMA node7 CPU(s):    560-639
+
+    ## Current 
+
+    ## Important Boundaries
+    1. Usable CPU resource management tools include numactl and taskset.
+
+    ## Recommended Workflow
+    1. Analyze the system information and current CPU state.
+    2. Design the CPU resource remapping and binding policy.
+    3. Translate the policy into executable commands.
+
+    ## Command Execution Rules
+    You are operating in an environment where
+    1. You write a single command
+    2. The system executes that command in a subshell
+
+    Format your responses like this:
+
+    <format_example>
+    THOUGHT: Here I explain my reasoning process, analysis of the current situation,
+    and what I'm trying to accomplish with the command below.
+
+    ```bash
+    your_command_here
+    ```
+    </format_example>
+
+    Commands must be specified in a single bash code block:
+
+    ```bash
+    your_command_here
+    ```
+
+    **CRITICAL REQUIREMENTS:**
+    - Your response SHOULD include a THOUGHT section explaining your reasoning
+    - Your response MUST include EXACTLY ONE bash code block
+    - This bash block MUST contain EXACTLY ONE command (or a set of commands connected with && or ||)
+    - If you include zero or multiple bash blocks, or no command at all, YOUR RESPONSE WILL FAIL
+    - Do NOT try to run multiple independent commands in separate blocks in one response
+
+    Example of a CORRECT response:
+    <example_response>
+    THOUGHT: I need to understand the states of the running processes first. 
+    The LLC-load-misses of PID_A and PID_B are high and they are now on the same numa node. I need to place them onto different numa node.
+
+    ```bash
+    numactl --cpunodebind=0 --membind=0 -p $PID_A
+    numactl --cpunodebind=1 --membind=1 -p $PID_B
+    ```
+    </example_response>
+
+    If you need to run multiple commands, either:
+    1. Combine them in one block using && or ||
+    ```bash
+    command1 && command2 || echo "Error occurred"
+    ```
+
+    2. Wait for the first command to complete, see its output, then issue the next command in your following response.
+
+    ## Environment Details
+    - You have a full Linux shell environment
+    - Always use non-interactive flags (-y, -f) for commands
+    - Avoid interactive tools like vi, nano, or any that require user input
+    - If a command isn't available, you can install it
+
+    ## Useful Command Examples
+
+    ### numactl:
+    ```bash
+
+    ```
+
+    ### taskset:
+    ```bash
+
+    ```
+
+
+
+    </instructions>
+  action_observation_template: |
+    <returncode>{{output.returncode}}</returncode>
+    {% if output.output | length < 10000 -%}
+    <output>
+    {{ output.output -}}
+    </output>
+    {%- else -%}
+    <warning>
+    The output of your last command was too long.
+    Please try a different command that produces less output.
+    If you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.
+    If you're using grep or find and it produced too much output, you can use a more selective search pattern.
+    If you really need to see something from the full command's output, you can redirect output to a file and then search in that file.
+    </warning>
+    {%- set elided_chars = output.output | length - 10000 -%}
+    <output_head>
+    {{ output.output[:5000] }}
+    </output_head>
+    <elided_chars>
+    {{ elided_chars }} characters elided
+    </elided_chars>
+    <output_tail>
+    {{ output.output[-5000:] }}
+    </output_tail>
+    {%- endif -%}
+  format_error_template: |
+    Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions.
+
+    Please format your action in triple backticks as shown in <response_example>.
+
+    <response_example>
+    Here are some thoughts about why you want to perform the action.
+
+    ```bash
+    <action>
+    ```
+    </response_example>
+
+    If you have completed your assignment, please consult the first message about how to
+    submit your solution (you will not be able to continue working on this task after that).
+  step_limit: 250
+  cost_limit: 3.
+
+environment:
+  cwd: "/testbed"
+  timeout: 60
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: 'off'
+    TQDM_DISABLE: '1'
+  environment_class: docker
+
+model:
+  model_name: "anthropic/claude-sonnet-4-5-20250929"
+  model_kwargs:
+    drop_params: true
+    temperature: 0.0
