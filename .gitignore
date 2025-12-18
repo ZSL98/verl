@@ -123,6 +123,9 @@ ENV/
 # data
 *.parquet
 
+*_sensitive
+*_intensive
+*short_batch_task
 
 # local logs
 logs
