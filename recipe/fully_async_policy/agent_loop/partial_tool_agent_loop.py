@@ -86,7 +86,7 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
         image_data = copy.deepcopy(kwargs.get("multi_modal_data", {}).get("image", None))
         metrics = {}
         request_id = uuid4().hex
-        tools_kwargs = kwargs.get("tools_kwargs", {})
+        tools_kwargs = copy.deepcopy(kwargs.get("tools_kwargs", {}) or {})
 
         # Initialize interaction if needed
         interaction = None
