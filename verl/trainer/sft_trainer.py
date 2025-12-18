@@ -35,16 +35,11 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint import CheckpointHandler
 from verl.utils.dataset.dataset_utils import SFTTensorCollator
 from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
-from verl.utils.device import get_device_name, is_cuda_available, is_npu_available
+from verl.utils.device import get_device_name
 from verl.utils.distributed import destroy_global_process_group
 from verl.utils.logger import log_with_rank
 from verl.utils.tracking import Tracking
 from verl.workers.engine_workers import TrainingWorker
-
-if is_cuda_available:
-    pass
-elif is_npu_available:
-    pass
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "WARN"))
@@ -145,12 +140,21 @@ class SFTTrainer:
     def _build_dataset(self):
         config = self.config
         tokenizer = self.model_config.tokenizer
+        processor = self.model_config.processor
         train_dataset = create_sft_dataset(
-            config.data.train_files, config.data, tokenizer, max_samples=config.data.get("train_max_samples", -1)
+            config.data.train_files,
+            config.data,
+            tokenizer,
+            processor,
+            max_samples=config.data.get("train_max_samples", -1),
         )
         if config.data.val_files:
             val_dataset = create_sft_dataset(
-                config.data.val_files, config.data, tokenizer, max_samples=config.data.get("val_max_samples", -1)
+                config.data.val_files,
+                config.data,
+                tokenizer,
+                processor,
+                max_samples=config.data.get("val_max_samples", -1),
             )
         else:
             val_dataset = None
@@ -183,7 +187,7 @@ class SFTTrainer:
             sampler=self.train_sampler,
             collate_fn=self.collate_fn,
             num_workers=8,
-            pin_memory=True,
+            pin_memory=False,
             drop_last=True,
             pin_memory_device=device_name,
         )
@@ -198,7 +202,7 @@ class SFTTrainer:
                 sampler=self.val_sampler,
                 collate_fn=self.collate_fn,
                 num_workers=8,
-                pin_memory=True,
+                pin_memory=False,
                 drop_last=True,
                 pin_memory_device=device_name,
             )
@@ -372,20 +376,22 @@ def main(config):
     run_sft(config)
 
 
-def create_sft_dataset(data_paths, data_config, tokenizer, max_samples=-1):
+def create_sft_dataset(data_paths, data_config, tokenizer, processor, max_samples=-1):
     """Create a dataset."""
     # build dataset
     # First check if a custom dataset class is specified
     if data_config.custom_cls.get("path", None):
-        from verl.utils.import_utils import load_extern_type
+        from verl.utils.import_utils import load_extern_object
 
-        dataset_cls = load_extern_type(data_config.custom_cls.path, data_config.custom_cls.name)
+        dataset_cls = load_extern_object(data_config.custom_cls.path, data_config.custom_cls.name)
     else:
         # Default to multi-turn dataset
         dataset_cls = MultiTurnSFTDataset
 
     # Create datasets based on the selected class
-    dataset = dataset_cls(parquet_files=data_paths, tokenizer=tokenizer, config=data_config, max_samples=max_samples)
+    dataset = dataset_cls(
+        parquet_files=data_paths, tokenizer=tokenizer, config=data_config, processor=processor, max_samples=max_samples
+    )
     return dataset
 
 
