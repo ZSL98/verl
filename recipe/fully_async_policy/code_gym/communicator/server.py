@@ -34,6 +34,12 @@ processing_requests = set()
 process_registry_lock = threading.Lock()
 tracked_processes: Dict[int, "TrackedProcess"] = {}
 
+# 3.1 队列统计：用于定时打印（每 10s）
+QUEUE_METRICS_INTERVAL_SECONDS = 10.0
+total_tasks_submitted = 0
+total_tasks_completed = 0
+queue_metrics_thread_started = False
+
 # 4. NUMA/CPU合法性校验正则
 NUMA_NODE_PATTERN = re.compile(r"^\d+$")  # 数字格式的NUMA节点
 CPU_LIST_PATTERN = re.compile(r"^\d+(,\d+)*(-\d+)*$")  # 支持1,2,3 或 0-7格式
@@ -581,39 +587,37 @@ def collect_baseline_sample() -> Dict[str, Any]:
     samples["benchmark_latest"] = collect_latest_benchmark_samples(workload_pids)
     return samples
 
-def _is_intensive_command(tokens: List[str]) -> bool:
-    """判断命令行中是否包含 *intensive 的二进制"""
-    for token in tokens:
-        name = Path(token).name
-        if name.endswith("intensive"):
-            return True
-    return False
+def _pid_is_tracked_workload(pid: int) -> bool:
+    """检查PID是否为当前 server 启动并仍在运行的 benchmark workload 进程。"""
+    cleanup_finished_processes()
+    with process_registry_lock:
+        tracked = tracked_processes.get(pid)
+    return tracked is not None and tracked.source.startswith("benchmark:")
 
 
-def _pid_is_intensive(pid: int) -> bool:
-    """检查给定PID是否对应 *intensive 结尾的任务"""
-    try:
-        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
-        for part in cmdline:
-            if not part:
+def _numactl_targets_benchmark_binary(cmd_parts: List[str]) -> bool:
+    """numactl 只允许执行 benchmarks/cpubench 下的 benchmark 二进制（避免任意命令执行）。"""
+    for token in cmd_parts[1:]:
+        token_path = Path(str(token))
+        candidates: List[Path]
+        if token_path.is_absolute():
+            candidates = [token_path]
+        else:
+            candidates = [
+                BENCHMARK_BIN_DIR / token_path,
+                BENCHMARK_DIR / token_path,
+            ]
+        for candidate in candidates:
+            try:
+                resolved = candidate.resolve()
+            except Exception:
+                resolved = candidate
+            try:
+                resolved.relative_to(BENCHMARK_BIN_DIR)
+            except ValueError:
                 continue
-            if Path(part.decode(errors="ignore")).name.endswith("intensive"):
+            if resolved.exists() and os.access(resolved, os.X_OK):
                 return True
-    except Exception:
-        pass
-    try:
-        ps = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "comm="],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=3
-        )
-        for line in ps.stdout.splitlines():
-            if Path(line.strip()).name.endswith("intensive"):
-                return True
-    except Exception:
-        pass
     return False
 
 
@@ -922,9 +926,9 @@ def run_single_bind_command(command_str: str) -> BindCommandResult:
             result.reward = failure_reward(result.error_msg)
             return result
 
-        # 绑定对象必须是 *intensive 任务
-        if base_cmd == "numactl" and not _is_intensive_command(cmd_parts):
-            result.error_msg = "numactl 绑定的目标命令必须是 *intensive 二进制"
+        # numactl 允许的目标命令必须是 benchmark 二进制（避免任意命令执行）
+        if base_cmd == "numactl" and not _numactl_targets_benchmark_binary(cmd_parts):
+            result.error_msg = f"numactl 绑定的目标命令必须是 {BENCHMARK_BIN_DIR} 下的 benchmark 二进制"
             result.reward = failure_reward(result.error_msg)
             return result
 
@@ -938,8 +942,8 @@ def run_single_bind_command(command_str: str) -> BindCommandResult:
                 result.error_msg = "taskset绑核缺少目标PID"
                 result.reward = failure_reward(result.error_msg)
                 return result
-            if not _pid_is_intensive(sample_pid):
-                result.error_msg = f"PID {sample_pid} 不是 *intensive 结尾的任务，拒绝绑核"
+            if not _pid_is_tracked_workload(sample_pid):
+                result.error_msg = f"PID {sample_pid} 不是 server 侧已记录的 workload 进程，拒绝绑核"
                 result.reward = failure_reward(result.error_msg)
                 return result
 
@@ -1039,9 +1043,35 @@ def process_bind_task(task_params: Dict[str, Any]) -> BindTaskResult:
         error_msg=error_msg
     )
 
+def queue_metrics_worker(interval_seconds: float = QUEUE_METRICS_INTERVAL_SECONDS) -> None:
+    """每隔 interval_seconds 打印队列统计：剩余/新增/完成。"""
+    global total_tasks_submitted, total_tasks_completed
+    with queue_lock:
+        last_submitted = total_tasks_submitted
+        last_completed = total_tasks_completed
+
+    while True:
+        time.sleep(interval_seconds)
+        with queue_lock:
+            queued = len(task_queue)
+            running = len(processing_requests)
+            submitted = total_tasks_submitted
+            completed = total_tasks_completed
+
+        new_cnt = submitted - last_submitted
+        solved_cnt = completed - last_completed
+        last_submitted = submitted
+        last_completed = completed
+
+        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        print(
+            f"[{ts}] 队列统计(每{int(interval_seconds)}s)：队列剩余={queued} 运行中={running} 新增={new_cnt} 完成={solved_cnt}",
+            flush=True,
+        )
+
 def process_queue():
     """处理任务队列（后台线程，串行执行）"""
-    global is_processing
+    global is_processing, total_tasks_completed
     with queue_lock:
         if is_processing or not task_queue:
             return
@@ -1064,6 +1094,7 @@ def process_queue():
             # 存储结果（供调用方获取，这里简化为内存存储，生产环境可改用Redis/数据库）
             with queue_lock:
                 completed_results[result.request_id] = result
+                total_tasks_completed += 1
 
     finally:
         with queue_lock:
@@ -1073,6 +1104,13 @@ def process_queue():
 @app.on_event("startup")
 async def on_startup():
     """服务启动时直接触发benchmark负载"""
+    global queue_metrics_thread_started
+    with queue_lock:
+        should_start = not queue_metrics_thread_started
+        if should_start:
+            queue_metrics_thread_started = True
+    if should_start:
+        threading.Thread(target=queue_metrics_worker, daemon=True, name="queue-metrics").start()
     trigger_random_workload_async(source="startup")
 
 # ======================== API接口 ========================
@@ -1083,6 +1121,7 @@ async def submit_bind_tasks(
     x_api_key: str = Header(None, description="API鉴权Key")
 ):
     """提交绑核指令序列，放入队列按顺序执行（异步，立即返回）"""
+    global total_tasks_submitted
     if x_api_key != AUTH_API_KEY:
         raise HTTPException(status_code=401, detail="未授权：API Key错误")
 
@@ -1102,6 +1141,7 @@ async def submit_bind_tasks(
 
         task_queue.append({"request_id": request_id, "bind_commands": bind_commands})
         queued_size = len(task_queue)
+        total_tasks_submitted += 1
 
     threading.Thread(target=process_queue, daemon=True).start()
 
