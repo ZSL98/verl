@@ -24,6 +24,7 @@ from pprint import pprint
 
 import numpy as np
 import ray
+import time
 import torch
 from omegaconf import OmegaConf
 from tqdm import tqdm
@@ -354,36 +355,33 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             #TODO(P0)-zsl: See if we can extract tool_reward from 'batch', since in partial_tool_agent_loop
             # tool_rewards has been updated. Otherwise, call get_reward according to the request_id
             #TODO(P0)-zh/hjl: Add interface "get_reward": (request_id: int)->(reward_score: float) # request_id should be extracted from 'batch'
-            
+
             request_ids = batch.non_tensor_batch["request_id"]
-            for req_id in request_ids:
-                print(f"request_id is {req_id},answer below:")
-                request_id = req_id
-                ps_result = None
-                lscpu_result = None
-                perf_result = None
-                latest_log = None
+            for request_id in request_ids:
                 for _ in range(10):
-                    bind_result = self.codegym_client.query_bind_result(request_id)
-                    code = bind_result.get("code")
+                    query_resp = self.codegym_client.query_bind_result(request_id)
+                    code = query_resp.get("code")
                     if code in (200, 500):
-                        print(f"\n查询结果：code={code} msg={bind_result.get('msg')}")
-                        data = bind_result.get("data", {}) or {}
-                        ps_result = data.get("ps_ef"),
-                        lscpu_result = data.get("lscpu"),
-                        perf_result = data.get("perf_stat"),
-                        latest_log = data.get("benchmark_latest")
+                        print(f"\n查询结果：code={code} msg={query_resp.get('msg')}")
+                        data = query_resp.get("data", {}) or {}
+                        if data.get("reward") is not None:
+                            reward = data.get("reward") or {}
+                            print(f"\nreward_score={reward.get('score')} exit_code={reward.get('exit_code')}")
+                            if reward.get("stderr"):
+                                print(f"reward_stderr:\n{reward.get('stderr')}")
+                        for idx, cmd_result in enumerate(data.get("command_results", []), start=1):
+                            print(f"\n--- 指令 {idx}: {cmd_result.get('command')} ---")
+                            print(f"bind_success={cmd_result.get('bind_success')}, exit_code={cmd_result.get('exit_code')}")
+                            if cmd_result.get("reward") is not None:
+                                cmd_reward = cmd_result.get("reward") or {}
+                                print(f"cmd_reward_score={cmd_reward.get('score')} exit_code={cmd_reward.get('exit_code')}")
+                            self.codegym_client.print_sample_results("采样结果", cmd_result.get("sample_results", {}))
                         break
                     print(f"任务未完成，继续等待... (status code={code})")
-                
-                print(f"ps_result = {ps_result}")
-                print(f"lscpu_result = {lscpu_result}")
-                print(f"perf_result = {perf_result}")
-                print(f"latest_log = {latest_log}")
+                    time.sleep(1)
+                else:
+                    print(f"request_id={request_id} 的请求查询超时，未获取到结果")
             
-            
-            
-
             if self.config.reward_model.launch_reward_fn_async:
                 future_reward = compute_reward_async.remote(data=batch, reward_fn=self.reward_fn)
             else:

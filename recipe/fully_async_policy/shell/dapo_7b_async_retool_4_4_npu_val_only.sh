@@ -128,6 +128,7 @@ python3 -m recipe.fully_async_policy.fully_async_main \
     trainer.val_only=False \
     trainer.log_val_generations=20 \
     trainer.save_freq=-1 \
+    +trainer.save_method="rank0" \
     trainer.default_local_dir=$default_local_dir \
     data.gen_batch_size=${gen_prompt_bsz} \
     trainer.nnodes=$NNODES \

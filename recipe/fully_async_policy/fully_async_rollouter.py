@@ -129,7 +129,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
 
         # ==================== fully async config ====================
 
-        self.total_rollout_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
+        self.total_rollout_steps = 300 # len(self.train_dataloader) * self.config.trainer.total_epochs
         if self.config.rollout.total_rollout_steps is not None:
             self.total_rollout_steps = min(self.config.rollout.total_rollout_steps, self.total_rollout_steps)
         print(f"[FullyAsyncRollouter] Total rollout steps: {self.total_rollout_steps}")
@@ -424,7 +424,8 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         for epoch in range(self.config.rollout.total_epochs):
             iterator = iter(self.train_dataloader)
             for batch_dict in iterator:
-                yield epoch, batch_dict
+                for _ in range(32):
+                    yield epoch, batch_dict
 
     async def _init_async_rollout_manager(self):
         # create async rollout manager and request scheduler

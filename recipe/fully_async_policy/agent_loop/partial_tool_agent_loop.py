@@ -148,7 +148,6 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
         """
         # State machine loop
         while state != AgentState.TERMINATED:
-            print(f"request_id:{agent_data.request_id},state:{state}")
             if cancellation_event and cancellation_event.is_set():
                 logger.info(f"[PartialToolAgent] Cancellation detected. Interrupted before/at state: {state.value}")
                 return state
