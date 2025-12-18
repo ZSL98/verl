@@ -69,7 +69,7 @@ test_freq=10
 staleness_threshold=0.5
 trigger_parameter_sync_step=4
 require_batches=1
-partial_rollout=True
+partial_rollout=False
 
 python3 -m recipe.fully_async_policy.fully_async_main \
     algorithm.adv_estimator=$adv_estimator \
@@ -124,8 +124,8 @@ python3 -m recipe.fully_async_policy.fully_async_main \
     trainer.logger=['console','tensorboard'] \
     trainer.project_name=$project_name \
     trainer.experiment_name=$experiment_name \
-    trainer.val_before_train=True \
-    trainer.val_only=True \
+    trainer.val_before_train=False \
+    trainer.val_only=False \
     trainer.log_val_generations=20 \
     trainer.save_freq=-1 \
     trainer.default_local_dir=$default_local_dir \

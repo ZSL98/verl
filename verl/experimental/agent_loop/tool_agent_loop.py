@@ -377,7 +377,8 @@ class ToolAgentLoop(AgentLoopBase):
         if agent_data.response_logprobs:
             agent_data.response_logprobs += [0.0] * len(response_ids)
         agent_data.user_turns += 1
-        return AgentState.GENERATING
+        #return AgentState.GENERATING
+        return AgentState.TERMINATED
 
     async def _handle_interacting_state(self, agent_data: AgentData) -> AgentState:
         """Handle the interacting state: get user input from interaction."""

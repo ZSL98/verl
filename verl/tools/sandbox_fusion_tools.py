@@ -130,24 +130,24 @@ class SandboxFusionTool(BaseTool):
         """
         super().__init__(config, tool_schema)
         self._instance_dict = {}
-        # TODO: better documentation for the config
-        self.num_workers = config.get("num_workers", 10)
-        self.rate_limit = config.get("rate_limit", 10)
-        self.default_timeout = config.get("default_timeout", 30)
-        self.default_language = config.get("default_language", "python")
-        self.enable_global_rate_limit = config.get("enable_global_rate_limit", True)
-        self.execution_pool = init_execution_pool(
-            num_workers=self.num_workers,
-            enable_global_rate_limit=self.enable_global_rate_limit,
-            rate_limit=self.rate_limit,
-            mode=PoolMode.ThreadMode,
-        )
-        self.sandbox_fusion_url = config.get("sandbox_fusion_url", "")
-        self.memory_limit_mb = config.get("memory_limit_mb", 1024)
-        if self.sandbox_fusion_url == "":
-            raise ValueError("sandbox_fusion_url is not set")
-        log_msg = f"Init SandboxFusionTool with config: {config}"
-        logger.info(log_msg)
+        # # TODO: better documentation for the config
+        # self.num_workers = config.get("num_workers", 10)
+        # self.rate_limit = config.get("rate_limit", 10)
+        # self.default_timeout = config.get("default_timeout", 30)
+        # self.default_language = config.get("default_language", "python")
+        # self.enable_global_rate_limit = config.get("enable_global_rate_limit", True)
+        # self.execution_pool = init_execution_pool(
+        #     num_workers=self.num_workers,
+        #     enable_global_rate_limit=self.enable_global_rate_limit,
+        #     rate_limit=self.rate_limit,
+        #     mode=PoolMode.ThreadMode,
+        # )
+        # self.sandbox_fusion_url = config.get("sandbox_fusion_url", "")
+        # self.memory_limit_mb = config.get("memory_limit_mb", 1024)
+        # if self.sandbox_fusion_url == "":
+        #     raise ValueError("sandbox_fusion_url is not set")
+        # log_msg = f"Init SandboxFusionTool with config: {config}"
+        # logger.info(log_msg)
 
     def get_openai_tool_schema(self) -> OpenAIFunctionToolSchema:
         return self.tool_schema

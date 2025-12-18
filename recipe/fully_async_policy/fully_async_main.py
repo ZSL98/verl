@@ -166,10 +166,6 @@ class FullyAsyncTaskRunner:
         self.components["role_worker_mapping"] = role_worker_mapping
         self.components["ray_worker_group_cls"] = ray_worker_group_cls
 
-        #TODO(P0)-hjl: create Euler-gym - the Sandbox
-        print("[ASYNC MAIN] Initializing CodeGym client...")
-        self.components["codegym_client"] = CodeGymClient()
-
         print("[ASYNC MAIN] Creating FullyAsyncRollouter...")
         self._create_rollouter(config)
 
@@ -218,7 +214,6 @@ class FullyAsyncTaskRunner:
         rollouter = FullyAsyncRollouter.remote(
             config=config,
             tokenizer=self.components["tokenizer"],
-            codegym_client=self.components["codegym_client"],
             role_worker_mapping={Role.Rollout: self.components["role_worker_mapping"][Role.Rollout]},
             resource_pool_manager=create_resource_pool_manager(config, roles=[Role.Rollout]),
             ray_worker_group_cls=self.components["ray_worker_group_cls"],
@@ -242,7 +237,6 @@ class FullyAsyncTaskRunner:
         trainer = FullyAsyncTrainer.remote(
             config=config,
             tokenizer=self.components["tokenizer"],
-            codegym_client=self.components["codegym_client"],
             role_worker_mapping=trainer_role_mapping,
             resource_pool_manager=create_resource_pool_manager(config, roles=list(trainer_role_mapping.keys())),
             ray_worker_group_cls=self.components["ray_worker_group_cls"],

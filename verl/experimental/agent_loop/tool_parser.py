@@ -84,25 +84,100 @@ class HermesToolParser(ToolParser):
         self.tool_call_regex = regex.compile(r"<tool_call>(.*?)</tool_call>", regex.DOTALL)
 
     @rollout_trace_op
-    async def extract_tool_calls(self, responses_ids: list[int]) -> tuple[str, list[FunctionCall]]:
-        loop = asyncio.get_running_loop()
-        text = await loop.run_in_executor(None, self.tokenizer.decode, responses_ids)
-        if self.tool_call_start_token not in text or self.tool_call_end_token not in text:
-            return text, []
+    async def extract_tool_calls(self, responses_ids: list[int],output: str) -> tuple[str, list[FunctionCall]]:
+        # print("hermes called")
+        # # loop = asyncio.get_running_loop()
+        # # text = await loop.run_in_executor(None, self.tokenizer.decode, responses_ids)
+        # # # if self.tool_call_start_token not in text or self.tool_call_end_token not in text:
+        # # #     return text, []
 
-        matches = self.tool_call_regex.findall(text)
+        # # matches = self.tool_call_regex.findall(text)
+        # # function_calls = []
+        # # for match in matches:
+        # #     try:
+        # #         function_call = json.loads(match)
+        # #         name, arguments = function_call["name"], function_call["arguments"]
+        # #         function_calls.append(FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
+        # #     except Exception as e:
+        # #         logger.error(f"Failed to decode tool call: {e}")
+
+        # # remaing text exclude tool call tokens
+        # # content = self.tool_call_regex.sub("", text)
+        # matches = self.tool_call_regex.findall(output)
+        # function_calls = []
+        # for match in matches:
+        #     # match 是纯命令字符串，如 "taskset -cp 0 12345"
+        #     command_str = match.strip()
+        #     if command_str:
+        #         try:
+        #             # 构造 arguments 字典并序列化为 JSON 字符串
+        #             arguments = {"commands": command_str}
+        #             function_calls.append(
+        #                 FunctionCall(
+        #                     name="http_command_sender",
+        #                     arguments=json.dumps(arguments, ensure_ascii=False)
+        #                 )
+        #             )
+        #         except Exception as e:
+        #             logger.error(f"Failed to create FunctionCall from command '{command_str}': {e}")
+
+        # # 移除所有工具调用标记，保留其余文本
+        # content = self.tool_call_regex.sub("", output).strip()
+        
+        # # fixed_function_calls = [
+        # #     FunctionCall(
+        # #         name="http_command_sender",  # 工具名称
+        # #         arguments=json.dumps({"command": "taskset -cp 0 {PID}"}, ensure_ascii=False)
+        # #     ),
+        # #     # FunctionCall(name="log_action", arguments=json.dumps({"action": "tool_triggered"}))
+        # # ]
+
+        # return content, function_calls
+        # #return content, function_calls
+
+        print("hermes called")
+
+        matches = self.tool_call_regex.findall(output)
         function_calls = []
+
         for match in matches:
+            stripped_match = match.strip()
+            if not stripped_match:
+                continue
+
+            # 尝试按原始 JSON 格式解析（{"name": "...", "arguments": {...}}）
             try:
-                function_call = json.loads(match)
-                name, arguments = function_call["name"], function_call["arguments"]
-                function_calls.append(FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
+                parsed = json.loads(stripped_match)
+                name = parsed.get("name")
+                arguments = parsed.get("arguments")
+
+                if name is not None and arguments is not None:
+                    # 确保 arguments 是 dict，然后序列化为 JSON 字符串
+                    if isinstance(arguments, dict):
+                        arguments_str = json.dumps(arguments, ensure_ascii=False)
+                    else:
+                        # 如果 arguments 已经是字符串（比如被双重编码），保留原样或再处理
+                        arguments_str = arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False)
+
+                    function_calls.append(FunctionCall(name=name, arguments=arguments_str))
+                    continue  # 成功解析，跳过 fallback
+            except (json.JSONDecodeError, TypeError, ValueError) as e:
+                pass  # 不是有效 JSON，走 fallback
+
+            # Fallback: treat as raw command string
+            try:
+                arguments = {"commands": stripped_match}
+                function_calls.append(
+                    FunctionCall(
+                        name="http_command_sender",
+                        arguments=json.dumps(arguments, ensure_ascii=False)
+                    )
+                )
             except Exception as e:
-                logger.error(f"Failed to decode tool call: {e}")
+                logger.error(f"Failed to create FunctionCall from command '{stripped_match}': {e}")
 
-        # remaing text exclude tool call tokens
-        content = self.tool_call_regex.sub("", text)
-
+        # Remove all tool call tokens, keep the rest as content
+        content = self.tool_call_regex.sub("", output).strip()
         return content, function_calls
 
 

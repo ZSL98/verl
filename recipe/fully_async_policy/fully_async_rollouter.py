@@ -28,6 +28,7 @@ from recipe.fully_async_policy.detach_utils import (
 )
 from recipe.fully_async_policy.message_queue import MessageQueueClient
 from recipe.fully_async_policy.ray_trainer import FullyAsyncRayPPOTrainer
+from recipe.fully_async_policy.code_gym.communicator.client import CodeGymClient
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 from verl.trainer.ppo.reward import load_reward_manager
@@ -49,7 +50,6 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         self,
         config,
         tokenizer,
-        codegym_client,
         role_worker_mapping: dict[Role, WorkerType],
         resource_pool_manager: ResourcePoolManager,
         ray_worker_group_cls: RayWorkerGroup = RayWorkerGroup,
@@ -60,7 +60,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
     ):
         # Store the tokenizer for text processing
         self.tokenizer = tokenizer
-        self.codegym_client = codegym_client
+        self.codegym_client = CodeGymClient()
         self.processor = processor
         self.config = config
         self.reward_fn = load_reward_manager(
@@ -227,7 +227,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
 
     def get_total_train_steps(self):
         return self.total_train_steps
-
+    
     def _state_switch(self, version: int):
         stop_resp = self.codegym_client.stop_all_processes()
         assert stop_resp.get("code") == 200, f"stop processes failed: {stop_resp}"
@@ -264,7 +264,10 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             print(f"lscpu_result = {self.lscpu_result}")
             print(f"perf_result = {self.perf_result}")
             print(f"latest_log = {self.latest_log}")
-
+            first_pid = self.pid_msg.split(',', 1)[0]
+            with open("pid.txt", "w", encoding="utf-8") as f:
+                f.write(first_pid)
+            
             old_version = self.current_param_version
             self.current_param_version = version
             # every time param change, reset staleness_samples
@@ -288,6 +291,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 f",idle_ratio: {idle_ratio}"
             )
             val_metrics = None
+            print("val_metrics = None")
             if (
                 self.val_reward_fn is not None
                 and self.config.rollout.test_freq > 0
@@ -441,19 +445,20 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             # Similar to _prepare_generate_batch: Separate data
             full_batch = prepare_single_generation_data(batch_dict, self.config)
             #TODO(P0)-hjl: The raw prompt is inside full_batch, attach the contents in self.gym_state:dict onto the raw prompt
-            gym_str = self.ps_result + self.lscpu_result + self.perf_result
+
+            gym_str = ""
             raw_prompt_batch = full_batch.non_tensor_batch["raw_prompt"]
             for i in range(len(raw_prompt_batch)):
                 messages = raw_prompt_batch[i]
                 assert isinstance(messages, list), f"Sample {i} is not a message list: {type(messages)}"
                 assert len(messages) > 0, f"Sample {i} has empty messages"
-
                 for msg in messages:
                     if msg["role"] == "user":
-                        msg["content"] = f"[pids]{self.pid_msg}, [GymState]{gym_str} " + msg["content"]
+                        msg["content"] = f"[pids]{self.pid_msg}, [GymState]{gym_str} ,"
                         break
             
             sample_id = f"sample_{epoch}_{self.global_steps}"
+            print(f"sample_id={sample_id}")
 
             rollout_sample = RolloutSample(
                 full_batch=full_batch,
@@ -588,6 +593,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             else:
                 self.dropped_stale_samples += 1
         else:
+            print(f"[DEBUG] Sample {rollout_sample.sample_id} was CANCELLED")
             rollout_sample.agent_loop_output_list = ret
             await self.cancel_queue.put(rollout_sample)
 

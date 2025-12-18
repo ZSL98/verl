@@ -278,3 +278,6 @@ def main() -> None:
         print(f"任务未完成，继续等待... (status code={code})")
     else:
         print("查询超时，未获取到结果")
+
+if __name__ == "__main__":
+    main()

@@ -141,6 +141,7 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
         """
         # State machine loop
         while state != AgentState.TERMINATED:
+            print(f"request_id:{agent_data.request_id},state:{state}")
             if cancellation_event and cancellation_event.is_set():
                 logger.info(f"[PartialToolAgent] Cancellation detected. Interrupted before/at state: {state.value}")
                 return state
@@ -213,9 +214,26 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
             return AgentState.TERMINATED
         if self.max_user_turns and agent_data.user_turns >= self.max_user_turns:
             return AgentState.TERMINATED
-
+        PID = None
+        with open("pid.txt", "r", encoding="utf-8") as f:
+            PID = f.read()
+        output = f"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa<tool_call>taskset -cp 0 {PID}</tool_call>bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         # Extract tool calls
-        _, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids)
+        _, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids,output)
+
+
+        if not hasattr(agent_data, 'tools_kwargs') or agent_data.tools_kwargs is None:
+            agent_data.tools_kwargs = {}
+
+        tool_name = "http_command_sender"
+
+        if tool_name not in agent_data.tools_kwargs:
+            agent_data.tools_kwargs[tool_name] = {}
+
+        # 注入 request_id 到 create_kwargs
+        agent_data.tools_kwargs[tool_name]["create_kwargs"] = agent_data.tools_kwargs[tool_name].get("create_kwargs", {})
+        agent_data.tools_kwargs[tool_name]["create_kwargs"]["request_id"] = agent_data.request_id
+
 
         # Handle interaction if needed
         if self.interaction_config_file:
@@ -224,7 +242,7 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
             )
             add_messages.append({"role": "assistant", "content": assistant_message})
             agent_data.messages.extend(add_messages)
-
+        print(f"request_id:{agent_data.request_id},tool_calls:{agent_data.tool_calls}")
         # Determine next state
         if agent_data.tool_calls:
             return AgentState.PROCESSING_TOOLS
@@ -268,6 +286,12 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
                 "request_id": agent_data.request_id,
             }
         )
+        print(f"[{agent_data.request_id}] Final messages after loop:")
+        for i, msg in enumerate(agent_data.messages):
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")[:200]  # 截断长内容避免刷屏
+            tool_calls = msg.get("tool_calls", [])
+            print(f"  [{i}] {role}: {repr(content)}" + (f" | tool_calls: {tool_calls}" if tool_calls else ""))
         return output
 
     def _build_cancelled_output(self, agent_data: AgentData, state: AgentState) -> AgentLoopOutput:

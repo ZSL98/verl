@@ -384,9 +384,7 @@ class AgentLoopWorkerBase:
                 )
             )
         outputs = await asyncio.gather(*tasks)
-
         output = self._postprocess(outputs)
-
         return output
 
     async def _run_agent_loop(
@@ -443,7 +441,6 @@ class AgentLoopWorkerBase:
         #   e.g., [1,1,1,1,1,1,1,(tool start),0,0(tool end),1,1,0,0,0,0]
         # - position_ids: sequential positions for tokens, starting at 0
         #   e.g., [0,0,0,0,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,0,0,0,0]
-
         self.tokenizer.padding_side = "left"
         prompt_output = self.tokenizer.pad(
             {"input_ids": output.prompt_ids},
@@ -790,7 +787,8 @@ class AgentLoopManager:
         Returns:
             DataProto: Output batch.
         """
-
+        
+        print("-------------------------------------------------------------------------")
         # Fix for Issue #4147: Always call wake_up() to ensure weight sync
         # The wake_up()/sleep() methods internally check free_cache_engine
         self.wake_up()
@@ -798,6 +796,7 @@ class AgentLoopManager:
             self.reward_model_manager.wake_up()
 
         chunkes = prompts.chunk(len(self.agent_loop_workers))
+        print(f"len(chunkes)={len(chunkes)}")
         outputs = ray.get(
             [
                 worker.generate_sequences.remote(chunk)

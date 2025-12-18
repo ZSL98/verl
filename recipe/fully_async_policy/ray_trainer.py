@@ -62,13 +62,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self._create_worker_classes()
         self._init_worker_groups()
         self._init_models()
+        self._init_codegym()
         self._init_async_rollout_manager()
-        self.codegym_client = CodeGymClient()
 
     def _init_resource_pools(self):
         self.resource_pool_manager.create_resource_pool()
 
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
+
+    def _init_codegym(self):
+        self.codegym_client = CodeGymClient()
 
     def _create_worker_classes(self):
         self._create_actor_rollout_classes()
@@ -351,10 +354,36 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             #TODO(P0)-zsl: See if we can extract tool_reward from 'batch', since in partial_tool_agent_loop
             # tool_rewards has been updated. Otherwise, call get_reward according to the request_id
             #TODO(P0)-zh/hjl: Add interface "get_reward": (request_id: int)->(reward_score: float) # request_id should be extracted from 'batch'
-            request_id = 0
-            bind_result = self.codegym_client.query_bind_result(request_id)
-            # get_reward
             
+            request_ids = batch.non_tensor_batch["request_id"]
+            for req_id in request_ids:
+                print(f"request_id is {req_id},answer below:")
+                request_id = req_id
+                ps_result = None
+                lscpu_result = None
+                perf_result = None
+                latest_log = None
+                for _ in range(10):
+                    bind_result = self.codegym_client.query_bind_result(request_id)
+                    code = bind_result.get("code")
+                    if code in (200, 500):
+                        print(f"\n查询结果：code={code} msg={bind_result.get('msg')}")
+                        data = bind_result.get("data", {}) or {}
+                        ps_result = data.get("ps_ef"),
+                        lscpu_result = data.get("lscpu"),
+                        perf_result = data.get("perf_stat"),
+                        latest_log = data.get("benchmark_latest")
+                        break
+                    print(f"任务未完成，继续等待... (status code={code})")
+                
+                print(f"ps_result = {ps_result}")
+                print(f"lscpu_result = {lscpu_result}")
+                print(f"perf_result = {perf_result}")
+                print(f"latest_log = {latest_log}")
+            
+            
+            
+
             if self.config.reward_model.launch_reward_fn_async:
                 future_reward = compute_reward_async.remote(data=batch, reward_fn=self.reward_fn)
             else:
