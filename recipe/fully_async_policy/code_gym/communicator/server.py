@@ -894,7 +894,7 @@ def sample_process_state(pid: int) -> Dict[str, Any]:
     workload_processes = get_workload_processes()
     workload_pids = [item["pid"] for item in workload_processes]
     samples["workload_processes"] = workload_processes
-    samples["workload_l3_hit_rate"] = sample_workload_l3_hit_rate(workload_pids, sample_seconds=0.5)
+    samples["workload_l3_hit_rate"] = sample_workload_l3_hit_rate(workload_pids, sample_seconds=0.2)
     samples["workload_cpu_percent"] = sample_workload_cpu_percent_top(workload_pids, delay_seconds=0.2, iterations=2)
     # 返回所有负载进程的最新采样日志，而非仅目标PID
     samples["benchmark_latest"] = collect_latest_benchmark_samples(workload_pids)
@@ -973,8 +973,8 @@ def run_single_bind_command(command_str: str) -> BindCommandResult:
                 result.reward = failure_reward(result.error_msg)
                 return result
 
-        # 运行1秒后采样
-        time.sleep(1)
+        # 运行0.2秒后采样
+        time.sleep(0.2)
         result.sample_results = sample_process_state(result.pid or 0)
 
         # 对于非 taskset 命令：若已退出且返回码非0，视为执行失败
