@@ -86,14 +86,7 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
         image_data = copy.deepcopy(kwargs.get("multi_modal_data", {}).get("image", None))
         metrics = {}
         request_id = uuid4().hex
-        # NOTE:
-        # In fully-async rollout we may `repeat()` the same sample `n` times for
-        # multiple responses per prompt. `DataProto.repeat()` repeats object-typed
-        # `non_tensor_batch` entries by reference (np.repeat), so `tools_kwargs`
-        # can be shared across those repeated samples. We mutate `tools_kwargs`
-        # later to inject per-trajectory request_id; without a deepcopy this can
-        # cause concurrent overwrite and duplicated request_id submissions.
-        tools_kwargs = copy.deepcopy(kwargs.get("tools_kwargs") or {})
+        tools_kwargs = kwargs.get("tools_kwargs", {})
 
         # Initialize interaction if needed
         interaction = None
