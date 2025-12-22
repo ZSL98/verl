@@ -166,7 +166,7 @@ class HermesToolParser(ToolParser):
 
             # Fallback: treat as raw command string
             try:
-                arguments = {"commands": stripped_match}
+                arguments = {"command": stripped_match}
                 function_calls.append(
                     FunctionCall(
                         name="http_command_sender",

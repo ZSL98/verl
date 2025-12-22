@@ -113,9 +113,9 @@ class CodeGymClient:
                 self._latest_seen_workload_pids = pids
         return payload
 
-    def submit_bind_task(self, request_id: str, commands: List[str]) -> Dict[str, Any]:
+    def submit_bind_task(self, request_id: str, command: str) -> Dict[str, Any]:
         url = f"{self.server_base_url}/bind-tasks"
-        payload = {"request_id": request_id, "bind_commands": commands}
+        payload = {"request_id": request_id, "bind_command": command}
         resp = self.session.post(url, json=payload, headers=self._headers(), timeout=20)
         return resp.json()
 
@@ -272,8 +272,8 @@ def main() -> None:
     print(f"\n选中的目标PID：{target_pid}")
 
     request_id = f"client-{uuid.uuid4()}"
-    bind_commands = [f"taskset -cp 0 {target_pid}"]
-    submit_resp = client.submit_bind_task(request_id, bind_commands)
+    bind_command = f"taskset -cp 0 {target_pid}"
+    submit_resp = client.submit_bind_task(request_id, bind_command)
     print(f"\n提交结果：code={submit_resp.get('code')} msg={submit_resp.get('msg')} request_id={request_id}")
 
     for _ in range(10):

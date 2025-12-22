@@ -14,6 +14,7 @@
 
 import os
 import yaml
+from pathlib import Path
 
 import logging
 import re
@@ -88,21 +89,30 @@ class CustomSandboxFusionTool(SandboxFusionTool):
         # result = await self.execution_pool.execute.remote(self.execute_code, instance_id, code, timeout, language)
         # # sandbox has no score or metrics, use Nones
         # return result, None, None
-        commands = parameters.get("commands")
+        command = parameters.get("command")
+        if command is None:
+            # Backward-compatible alias (older schema used `commands`)
+            command = parameters.get("commands")
 
-        # 如果 commands 不是 list 类型，包装成单元素列表
-        if not isinstance(commands, list):
-            commands = [str(commands)]
-        else:
-            # 确保列表中每个元素都是字符串
-            commands = [str(cmd) for cmd in commands]
+        if isinstance(command, list):
+            if not command:
+                command = ""
+            else:
+                if len(command) > 1:
+                    logger.warning("Received multiple commands; only the first one will be submitted.")
+                command = command[0]
+
+        command = str(command or "").strip()
 
         state = self._instance_dict[instance_id]
         request_id = state.get("request_id")
         if request_id is None:
             logger.warning("request_id not found in instance state. Using instance_id as fallback.")
             request_id = instance_id
-        self._code_gym.submit_bind_task(request_id, commands=commands)
+        if command:
+            self._code_gym.submit_bind_task(request_id, command=command)
+        else:
+            logger.warning("Empty command received; skip submitting bind task.")
         result_text = ""
         tool_response = ToolResponse(text=result_text)
         reward = 0.0
@@ -114,17 +124,46 @@ answer_format = """\nThe answer format must be: \\boxed{'The final answer goes h
 
 class CustomRLHFDataset(RLHFDataset):
 
+    def _resolve_prompt_yaml_path(self) -> Path:
+        # Precedence: hydra config -> env var -> default
+        prompt_yaml_path = None
+        try:
+            prompt_yaml_path = self.config.get("prompt_yaml_path", None)
+        except Exception:
+            prompt_yaml_path = None
+        prompt_yaml_path = prompt_yaml_path or os.getenv("VERL_PROMPT_YAML_PATH")
+
+        if not prompt_yaml_path:
+            return Path(__file__).resolve().parent / "swebench.yaml"
+
+        raw_path = Path(os.path.expanduser(str(prompt_yaml_path)))
+        candidates = [raw_path] if raw_path.is_absolute() else [Path.cwd() / raw_path, Path(__file__).resolve().parent / raw_path]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+
+        raise FileNotFoundError(
+            f"Prompt template file not exists: {prompt_yaml_path} (tried: {', '.join(str(c) for c in candidates)})"
+        )
+
     def _load_yaml_templates(self) -> tuple[str, str]:
-        self.yaml_config_path = "recipe/fully_async_policy/agent_loop/swebench.yaml"
-        if not os.path.exists(self.yaml_config_path):
-            raise FileNotFoundError(f"Prompt template file not exists: {self.yaml_config_path}")
-        
-        with open(self.yaml_config_path, "r", encoding="utf-8") as f:
-            yaml_data = yaml.safe_load(f)
-        
-        system_template = yaml_data.get("agent", {}).get("system_template", "").strip()
-        instance_template = yaml_data.get("agent", {}).get("instance_template", "").strip()
-        
+        yaml_path = self._resolve_prompt_yaml_path()
+        if not yaml_path.exists():
+            raise FileNotFoundError(f"Prompt template file not exists: {yaml_path}")
+
+        self.yaml_config_path = str(yaml_path)
+        with yaml_path.open("r", encoding="utf-8") as f:
+            yaml_data = yaml.safe_load(f) or {}
+
+        agent_cfg = yaml_data.get("agent", {}) or {}
+        system_template = str(agent_cfg.get("system_template", "") or "").strip()
+        instance_template = str(agent_cfg.get("instance_template", "") or "").strip()
+
+        if not system_template:
+            raise ValueError(f"Missing `agent.system_template` in prompt yaml: {yaml_path}")
+        if not instance_template:
+            raise ValueError(f"Missing `agent.instance_template` in prompt yaml: {yaml_path}")
+
         return system_template, instance_template
 
     def _read_files_and_tokenize(self):

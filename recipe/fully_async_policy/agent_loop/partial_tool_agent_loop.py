@@ -213,12 +213,11 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
             return AgentState.TERMINATED
         if self.max_user_turns and agent_data.user_turns >= self.max_user_turns:
             return AgentState.TERMINATED
-        PID = None
-        with open("pid.txt", "r", encoding="utf-8") as f:
-            PID = f.read()
-        output = f"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa<tool_call>taskset -cp 0 {PID}</tool_call>bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        output = await self.loop.run_in_executor(
+            None, lambda: self.tokenizer.decode(agent_data.response_ids, skip_special_tokens=True)
+        )
         # Extract tool calls
-        _, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids,output)
+        _, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids, output)
 
 
         if not hasattr(agent_data, 'tools_kwargs') or agent_data.tools_kwargs is None:

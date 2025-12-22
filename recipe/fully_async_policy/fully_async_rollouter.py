@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import copy
 import os
 import time
 from pprint import pformat
+from typing import Any
 
 import numpy as np
 import ray
@@ -61,6 +63,8 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         # Store the tokenizer for text processing
         self.tokenizer = tokenizer
         self.codegym_client = CodeGymClient()
+        self.pid_msg = ""
+        self.gym_state = {}
         self.processor = processor
         self.config = config
         self.reward_fn = load_reward_manager(
@@ -234,19 +238,78 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
 
         workload_info = self.codegym_client.start_random_workload()
         assert workload_info.get("code") == 200, f"start baseline failed: {workload_info}"
-        pid_msg = workload_info.get("msg", "")
 
         profiling_result = self.codegym_client.fetch_baseline_sample()
         assert profiling_result.get("code") == 200, f"profile baseline failed: {profiling_result}"
         profiling_data = profiling_result.get("data", {}) or {}
 
-        return (
-            pid_msg,
-            profiling_data.get("ps_ef"),
-            profiling_data.get("lscpu"),
-            profiling_data.get("perf_stat"),
-            profiling_data.get("benchmark_latest")
-        )
+        workload_processes = profiling_data.get("workload_processes", []) or []
+        workload_pids = []
+        if isinstance(workload_processes, list):
+            for item in workload_processes:
+                if not isinstance(item, dict):
+                    continue
+                pid = item.get("pid")
+                try:
+                    workload_pids.append(int(pid))
+                except (TypeError, ValueError):
+                    continue
+        if not workload_pids:
+            workload_pids = (workload_info.get("data") or {}).get("pids") or []
+        workload_pids = list(dict.fromkeys([int(pid) for pid in workload_pids if str(pid).isdigit()]))
+        pid_msg = ",".join(str(pid) for pid in workload_pids)
+
+        cpu_sample = profiling_data.get("workload_cpu_percent") or {}
+        cpu_percent_raw = cpu_sample.get("cpu_percent") if isinstance(cpu_sample, dict) else {}
+        cpu_percent = {}
+        if isinstance(cpu_percent_raw, dict):
+            for pid, value in cpu_percent_raw.items():
+                try:
+                    pid_int = int(pid)
+                except (TypeError, ValueError):
+                    continue
+                if value is None:
+                    cpu_percent[str(pid_int)] = None
+                    continue
+                try:
+                    cpu_percent[str(pid_int)] = float(value)
+                except (TypeError, ValueError):
+                    cpu_percent[str(pid_int)] = None
+        for pid in workload_pids:
+            cpu_percent.setdefault(str(pid), None)
+
+        l3_sample = profiling_data.get("workload_l3_hit_rate") or {}
+        loads_event = l3_sample.get("loads_event") if isinstance(l3_sample, dict) else None
+        misses_event = l3_sample.get("misses_event") if isinstance(l3_sample, dict) else None
+        l3_results_raw = l3_sample.get("results") if isinstance(l3_sample, dict) else {}
+        l3_results = {}
+        if isinstance(l3_results_raw, dict):
+            for pid, metrics in l3_results_raw.items():
+                if not isinstance(metrics, dict):
+                    continue
+                try:
+                    pid_int = int(pid)
+                except (TypeError, ValueError):
+                    continue
+                l3_results[str(pid_int)] = {
+                    "hit_rate": metrics.get("hit_rate"),
+                    "loads": metrics.get("loads"),
+                    "misses": metrics.get("misses"),
+                }
+        for pid in workload_pids:
+            l3_results.setdefault(str(pid), {"hit_rate": None, "loads": None, "misses": None})
+
+        gym_state = {
+            "workload_pids": workload_pids,
+            "workload_cpu_percent": cpu_percent,
+            "workload_l3_hit_rate": {
+                "loads_event": loads_event,
+                "misses_event": misses_event,
+                "results": l3_results,
+            },
+        }
+
+        return pid_msg, gym_state
 
     async def update_param_version(self, version: int, validate: bool = False, global_steps: int = 0):
         """Update current parameter version"""
@@ -258,15 +321,9 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             #                           then returns the profiling result (cpu util, ops) 
             #                           and selected benchmarks as strings
             #TODO(P0)-hjl rl: Store the profiling_result and corun_benchmarks into a dict (self.gym_state)
-            self.pid_msg, self.ps_result, self.lscpu_result, self.perf_result , self.latest_log = self._state_switch(version)
+            self.pid_msg, self.gym_state = self._state_switch(version)
             print(f"pid_msg = {self.pid_msg}")
-            print(f"ps_result = {self.ps_result}")
-            print(f"lscpu_result = {self.lscpu_result}")
-            print(f"perf_result = {self.perf_result}")
-            print(f"latest_log = {self.latest_log}")
-            first_pid = self.pid_msg.split(',', 1)[0]
-            with open("pid.txt", "w", encoding="utf-8") as f:
-                f.write(first_pid)
+            print(f"gym_state = {pformat(self.gym_state)}")
             
             old_version = self.current_param_version
             self.current_param_version = version
@@ -427,6 +484,101 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 for _ in range(32):
                     yield epoch, batch_dict
 
+    def _build_gym_state_prompt_suffix(self) -> str:
+        pid_csv = ""
+        workload_pids = self.gym_state.get("workload_pids") if isinstance(self.gym_state, dict) else None
+        if isinstance(workload_pids, list) and workload_pids:
+            pid_csv = ",".join(str(pid) for pid in workload_pids)
+        elif self.pid_msg:
+            pid_csv = str(self.pid_msg)
+
+        lines: list[str] = []
+        if pid_csv:
+            lines.append(f"[pids]{pid_csv}")
+
+        cpu_percent = self.gym_state.get("workload_cpu_percent") if isinstance(self.gym_state, dict) else None
+        if isinstance(cpu_percent, dict) and cpu_percent:
+            lines.append("workload_cpu_percent:")
+            pid_order = [str(pid) for pid in workload_pids] if isinstance(workload_pids, list) else []
+            for pid in pid_order:
+                if pid in cpu_percent:
+                    lines.append(f"  {pid}: {cpu_percent.get(pid)}")
+            for pid in sorted((set(cpu_percent.keys()) - set(pid_order)), key=lambda x: int(x) if str(x).isdigit() else str(x)):
+                lines.append(f"  {pid}: {cpu_percent.get(pid)}")
+
+        l3_hit_rate = self.gym_state.get("workload_l3_hit_rate") if isinstance(self.gym_state, dict) else None
+        if isinstance(l3_hit_rate, dict) and l3_hit_rate:
+            loads_event = l3_hit_rate.get("loads_event")
+            misses_event = l3_hit_rate.get("misses_event")
+            header = "workload_l3_hit_rate:"
+            if loads_event or misses_event:
+                header = f"workload_l3_hit_rate: loads_event={loads_event} misses_event={misses_event}"
+            lines.append(header)
+
+            results = l3_hit_rate.get("results")
+            if isinstance(results, dict) and results:
+                pid_order = [str(pid) for pid in workload_pids] if isinstance(workload_pids, list) else []
+                for pid in pid_order:
+                    metrics = results.get(pid)
+                    if not isinstance(metrics, dict):
+                        continue
+                    lines.append(
+                        f"  {pid}: hit_rate={metrics.get('hit_rate')} loads={metrics.get('loads')} misses={metrics.get('misses')}"
+                    )
+                for pid in sorted((set(results.keys()) - set(pid_order)), key=lambda x: int(x) if str(x).isdigit() else str(x)):
+                    metrics = results.get(pid)
+                    if not isinstance(metrics, dict):
+                        continue
+                    lines.append(
+                        f"  {pid}: hit_rate={metrics.get('hit_rate')} loads={metrics.get('loads')} misses={metrics.get('misses')}"
+                    )
+
+        if not lines:
+            return ""
+
+        return "\n\n" + "\n".join(lines) + "\n"
+
+    def _inject_gym_state_into_raw_prompt(self, batch: "DataProto") -> None:
+        suffix = self._build_gym_state_prompt_suffix()
+        if not suffix:
+            return
+
+        raw_prompt_batch = batch.non_tensor_batch.get("raw_prompt")
+        if raw_prompt_batch is None:
+            return
+
+        injected_by_id: dict[int, list[dict[str, Any]]] = {}
+        for i in range(len(raw_prompt_batch)):
+            messages = raw_prompt_batch[i]
+            if not isinstance(messages, list) or not messages:
+                continue
+
+            key = id(messages)
+            if key in injected_by_id:
+                raw_prompt_batch[i] = injected_by_id[key]
+                continue
+
+            injected_messages = copy.deepcopy(messages)
+            for msg in injected_messages:
+                if msg.get("role") != "user":
+                    continue
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    msg["content"] = content.rstrip() + suffix
+                elif isinstance(content, list):
+                    msg["content"] = content + [{"type": "text", "text": suffix}]
+                else:
+                    msg["content"] = str(content).rstrip() + suffix
+                break
+
+            raw_prompt_batch[i] = injected_messages
+            injected_by_id[key] = injected_messages
+
+    def _get_gen_batch(self, batch):
+        gen_batch = super()._get_gen_batch(batch)
+        self._inject_gym_state_into_raw_prompt(gen_batch)
+        return gen_batch
+
     async def _init_async_rollout_manager(self):
         # create async rollout manager and request scheduler
         assert self.config.actor_rollout_ref.rollout.mode == "async"
@@ -445,18 +597,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         for epoch, batch_dict in continuous_iterator:
             # Similar to _prepare_generate_batch: Separate data
             full_batch = prepare_single_generation_data(batch_dict, self.config)
-            #TODO(P0)-hjl: The raw prompt is inside full_batch, attach the contents in self.gym_state:dict onto the raw prompt
-
-            gym_str = ""
-            raw_prompt_batch = full_batch.non_tensor_batch["raw_prompt"]
-            for i in range(len(raw_prompt_batch)):
-                messages = raw_prompt_batch[i]
-                assert isinstance(messages, list), f"Sample {i} is not a message list: {type(messages)}"
-                assert len(messages) > 0, f"Sample {i} has empty messages"
-                for msg in messages:
-                    if msg["role"] == "user":
-                        msg["content"] = f"[pids]{self.pid_msg}, [GymState]{gym_str} ,"
-                        break
+            self._inject_gym_state_into_raw_prompt(full_batch)
             
             sample_id = f"sample_{epoch}_{self.global_steps}"
             print(f"sample_id={sample_id}")

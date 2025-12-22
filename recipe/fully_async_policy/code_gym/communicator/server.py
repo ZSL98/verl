@@ -106,7 +106,7 @@ class BindCommandResult:
 
 @dataclass
 class BindTaskResult:
-    """绑核任务（包含多条指令）的整体结果"""
+    """绑核任务（包含单条指令）的整体结果"""
     request_id: str
     success: bool
     command_results: List[BindCommandResult]
@@ -1188,38 +1188,35 @@ def run_single_bind_command(command_str: str) -> BindCommandResult:
 
 
 def process_bind_task(task_params: Dict[str, Any]) -> BindTaskResult:
-    """处理一串绑核指令：按顺序执行并采样，返回聚合结果"""
+    """处理单条绑核指令：执行并采样，返回结果"""
     request_id = task_params["request_id"]
-    commands: List[str] = task_params["bind_commands"]
-
-    command_results: List[BindCommandResult] = []
-    success = True
-    error_msg = ""
+    command: str = str(task_params["bind_command"])
 
     try:
-        for cmd in commands:
-            single_result = run_single_bind_command(cmd)
-            if not single_result.bind_success and single_result.reward is None:
-                single_result.reward = failure_reward(single_result.error_msg or "命令执行失败")
-            command_results.append(single_result)
-            if not single_result.bind_success:
-                success = False
-                if not error_msg:
-                    error_msg = single_result.error_msg
+        single_result = run_single_bind_command(command)
+        if not single_result.bind_success and single_result.reward is None:
+            single_result.reward = failure_reward(single_result.error_msg or "命令执行失败")
+        success = bool(single_result.bind_success)
+        error_msg = "" if success else (single_result.error_msg or "")
+        task_reward = single_result.reward
+        if not success:
+            task_reward = failure_reward(error_msg or "任务执行失败")
+        return BindTaskResult(
+            request_id=request_id,
+            success=success,
+            command_results=[single_result],
+            reward=task_reward,
+            error_msg=error_msg,
+        )
     except Exception as e:
-        success = False
         error_msg = f"任务执行异常：{str(e)}\n{traceback.format_exc()}"
-
-    task_reward = command_results[-1].reward if command_results else None
-    if not success:
-        task_reward = failure_reward(error_msg or "任务执行失败")
-    return BindTaskResult(
-        request_id=request_id,
-        success=success,
-        command_results=command_results,
-        reward=task_reward,
-        error_msg=error_msg
-    )
+        return BindTaskResult(
+            request_id=request_id,
+            success=False,
+            command_results=[],
+            reward=failure_reward(error_msg),
+            error_msg=error_msg,
+        )
 
 def queue_metrics_worker(interval_seconds: float = QUEUE_METRICS_INTERVAL_SECONDS) -> None:
     """每隔 interval_seconds 打印队列统计：剩余/新增/完成。"""
@@ -1295,17 +1292,18 @@ async def on_startup():
 @app.post("/bind-tasks")
 async def submit_bind_tasks(
     request_id: str = Body(..., description="唯一请求ID"),
-    bind_commands: List[str] = Body(..., description="一串绑核指令（按顺序执行）"),
+    bind_command: str = Body(..., description="绑核指令"),
     x_api_key: str = Header(None, description="API鉴权Key")
 ):
-    """提交绑核指令序列，放入队列按顺序执行（异步，立即返回）"""
+    """提交绑核指令，放入队列执行（异步，立即返回）"""
     global total_tasks_submitted
     if x_api_key != AUTH_API_KEY:
         raise HTTPException(status_code=401, detail="未授权：API Key错误")
 
-    if not bind_commands:
-        print("bind_commands不能为空")
-        raise HTTPException(status_code=400, detail="bind_commands不能为空")
+    bind_command = (bind_command or "").strip()
+    if not bind_command:
+        print("bind_command不能为空")
+        raise HTTPException(status_code=400, detail="bind_command不能为空")
 
     with queue_lock:
         duplicate = (
@@ -1317,7 +1315,7 @@ async def submit_bind_tasks(
             print(f"请求ID{request_id}已存在，请勿重复提交")
             raise HTTPException(status_code=400, detail=f"请求ID{request_id}已存在，请勿重复提交")
 
-        task_queue.append({"request_id": request_id, "bind_commands": bind_commands})
+        task_queue.append({"request_id": request_id, "bind_command": bind_command})
         queued_size = len(task_queue)
         total_tasks_submitted += 1
 

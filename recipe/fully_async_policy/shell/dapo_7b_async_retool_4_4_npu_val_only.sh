@@ -19,6 +19,8 @@ TEST_FILE="/root/workspace/data/gsm8k/test.parquet"
 # tool
 tool_config_path=recipe/fully_async_policy/agent_loop/sandbox_fusion_tool_config.yaml
 retool_path=recipe/fully_async_policy/agent_loop/retool.py
+PROMPT_YAML_PATH=${PROMPT_YAML_PATH:-recipe/fully_async_policy/agent_loop/prompt_thinking_a3.yaml}
+export VERL_PROMPT_YAML_PATH="$PROMPT_YAML_PATH"
 
 # wandb / tensorboard
 project_name=retool
