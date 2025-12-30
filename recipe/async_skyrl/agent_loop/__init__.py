@@ -15,6 +15,7 @@
 from .agent_loop import FullyAsyncAgentLoopManager
 from .partial_single_turn_agent_loop import PartialSingleTurnAgentLoop
 from .partial_tool_agent_loop import AsyncPartialToolAgentLoop
+from .mini_swe_agent_loop import MiniSweAgentLoop
 
-_ = [PartialSingleTurnAgentLoop, AsyncPartialToolAgentLoop]
+_ = [PartialSingleTurnAgentLoop, AsyncPartialToolAgentLoop, MiniSweAgentLoop]
 __all__ = [FullyAsyncAgentLoopManager]

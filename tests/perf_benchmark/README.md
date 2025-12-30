@@ -1,35 +1,49 @@
 # vLLM Performance Benchmark on Ascend
 
-This module tests the performance of a vLLM server with or without co-located SWE-bench evaluation.
+This module tests the performance of a vLLM server and SWE-bench evaluation separately or co-located (by running both scripts).
 
 ## Prerequisites
 
 - Ascend 910B node with Kunpeng 920 CPU
 - OpenEuler OS
-- Python environment with `vllm` and `swebench` installed (or present in the workspace)
+- Python environment with `vllm` and `swebench` installed
 - `perf` tool installed (for cache metrics)
 
 ## Usage
 
-Run the benchmark script:
+### 1. Run vLLM Benchmark
+
+This script starts a vLLM server, runs a benchmark client against it, and collects system metrics.
 
 ```bash
-# Standalone vLLM benchmark
-python benchmark.py --model "Qwen/Qwen2.5-3B"
+python run_vllm_benchmark.py --model "Qwen/Qwen2.5-3B"
+```
 
-# Co-located with SWE-bench
-python benchmark.py --model "Qwen/Qwen2.5-3B" --co-located
+### 2. Run SWE-bench Evaluation
+
+This script runs the SWE-bench evaluation (CPU intensive) and collects system metrics.
+
+```bash
+python run_swe_bench.py --instance-id "sympy__sympy-20590"
+```
+
+### Co-located Testing
+
+To test performance interference, run both scripts simultaneously in separate terminals.
+
+**Terminal 1 (Background Load):**
+```bash
+python run_swe_bench.py
+```
+
+**Terminal 2 (Measured Workload):**
+```bash
+python run_vllm_benchmark.py --model "Qwen/Qwen2.5-3B"
 ```
 
 ## Metrics
 
-The script collects:
-1.  **SLO-level metrics**: TTFT, TPOT, Throughput (via `vllm/benchmarks/benchmark_serving.py`)
-2.  **Hardware-level metrics**: CPU utilization trace, CPU cache hit ratio (via `psutil` and `perf`)
-
 Results are saved in the `results` directory as JSON files.
 
-## Configuration
-
-- Modify `benchmark.py` to adjust `vllm` arguments (tensor parallelism, dtype, etc.) or benchmark client parameters (request rate, num prompts).
-- Ensure `SWE-bench` is properly set up if running with `--co-located`.
+- **vLLM Results**: Contains TTFT, TPOT, Throughput, CPU usage, and Cache metrics.
+- **SWE-bench Results**: Contains CPU usage and Cache metrics during the evaluation.
