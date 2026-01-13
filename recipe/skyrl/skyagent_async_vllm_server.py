@@ -14,13 +14,14 @@ except Exception:
 
 from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
-from verl.workers.rollout.vllm_rollout.vllm_async_server import AsyncvLLMServerRegular
+from verl.workers.config import RolloutConfig, RewardModelConfig, HFModelConfig
+from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServerBase, vLLMReplica
 
 
 @ray.remote(num_cpus=1)
-class SkyAgentAsyncvLLMServer(AsyncvLLMServerRegular):
+class SkyAgentAsyncvLLMServer(vLLMHttpServerBase):
     async def generate(
-        self, prompt_ids: list[int], sampling_params: dict[str, Any], request_id: str
+        self, prompt_ids: list[int], sampling_params: dict[str, Any], request_id: str, image_data: Optional[list[Any]] = None,
     ) -> Tuple[str, str]:
         # max_tokens = self.max_model_len - len(prompt_ids)
         # sampling_params.pop("max_tokens", None)
@@ -57,3 +58,15 @@ class SkyAgentAsyncvLLMServer(AsyncvLLMServerRegular):
         }
 
         return response_str, meta_info
+
+class SkyAgentvLLMReplica(vLLMReplica):
+    def __init__(
+        self,
+        replica_rank: int,
+        config: RolloutConfig | RewardModelConfig,
+        model_config: HFModelConfig,
+        gpus_per_node: int = 8,
+        is_reward_model: bool = False,
+    ):
+        super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
+        self.server_class = SkyAgentAsyncvLLMServer

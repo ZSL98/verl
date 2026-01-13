@@ -119,13 +119,16 @@ ENV/
 
 # ckpt
 *.lock
+checkpoint
 
 # data
 *.parquet
-
+/data/*
 
 # local logs
 logs
 log
 outputs
 .history
+tensorboard_log
+trace

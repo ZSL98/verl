@@ -88,7 +88,7 @@ class SkyAgentPPOTrainer(RayPPOTrainer):
                 cls=self.role_worker_mapping[Role.ActorRollout],
                 config=self.config.actor_rollout_ref,
                 role="actor_rollout",
-                profile_option=self.config.trainer.npu_profile.options,
+                # profile_option=self.config.trainer.npu_profile.options,
             )
             self.resource_pool_to_cls[resource_pool]["actor_rollout"] = actor_rollout_cls
         else:
@@ -420,9 +420,10 @@ class SkyAgentPPOTrainer(RayPPOTrainer):
                 metrics = {}
                 timing_raw = {}
 
+                profile_steps = self.config.trainer.get("profile_steps", None)
                 do_profile = (
-                    self.global_steps in self.config.trainer.profile_steps
-                    if self.config.trainer.profile_steps is not None
+                    self.global_steps in profile_steps
+                    if profile_steps is not None
                     else False
                 )
                 with marked_timer("start_profile", timing_raw):
@@ -658,10 +659,12 @@ class SkyAgentPPOTrainer(RayPPOTrainer):
                             inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
                             outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
                             scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
+                            sample_gts = [item.non_tensor_batch.get("reward_model", {}).get("ground_truth", "") for item in batch]
                             self._dump_generations(
                                 inputs=inputs,
                                 outputs=outputs,
                                 scores=scores,
+                                gts=sample_gts,
                                 reward_extra_infos_dict=reward_extra_infos_dict,
                                 dump_path=rollout_data_dir,
                             )
@@ -736,7 +739,7 @@ class SkyAgentPPOTrainer(RayPPOTrainer):
                     self.train_dataloader.sampler.update(batch=batch)
 
                 # TODO: make a canonical logger that supports various backend
-                logger.log(data=metrics, step=self.global_steps, commit=True)
+                logger.log(data=metrics, step=self.global_steps)
 
                 progress_bar.update(1)
                 self.global_steps += 1

@@ -12,49 +12,18 @@ from verl.single_controller.ray.base import RayWorkerGroup
 from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
 from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
-from verl.workers.rollout.async_server import AsyncServerBase
+# from verl.workers.rollout.async_server import AsyncServerBase
+from typing import Any
+AsyncServerBase = Any
 
-
+from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager
 
+import os
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), "../../../SkyRL/skyrl-agent"))
 from skyrl_agent import AutoAgentRunner
-
-
-def async_server_class(
-    rollout_backend: str, rollout_backend_module: Optional[str] = None, rollout_backend_class: Optional[str] = None
-) -> type[AsyncServerBase]:
-    """Get async server class.
-
-    Args:
-        rollout_backend: str, rollout backend type (alias), should be "vllm" or "sglang".
-        rollout_backend_module: Optional[str], import path of the rollout backend.
-        rollout_backend_class: Optional[str], class name of the rollout backend.
-
-    Returns:
-        Type[AsyncServerBase]: async server class.
-    """
-    if rollout_backend_class is None and rollout_backend_module is None:
-        # If both are None, use the default backend class
-        # Do not change the original import behavior
-        # importlib.import_module and from ... import ... have subtle differences in ray
-
-        if rollout_backend == "vllm":
-            from .skyagent_async_vllm_server import SkyAgentAsyncvLLMServer
-
-            return SkyAgentAsyncvLLMServer
-        elif rollout_backend == "sglang":
-
-            raise NotImplementedError("Sglang backend for verl with skyagent is not implemented right now")
-
-        else:
-            raise NotImplementedError(f"rollout backend {rollout_backend} is not supported")
-
-    if rollout_backend_module is None or rollout_backend_class is None:
-        raise ValueError("rollout_backend_module and rollout_backend_class must be both provided for customization")
-
-    from verl.utils.import_utils import load_extern_type
-
-    return load_extern_type(rollout_backend_module, rollout_backend_class)
+from .skyagent_async_vllm_server import SkyAgentvLLMReplica
 
 
 class SkyAgentLoopManager(AgentLoopManager):
@@ -69,6 +38,7 @@ class SkyAgentLoopManager(AgentLoopManager):
         """
         self.config = config
         self.worker_group = worker_group
+        self.rollout_replica_class = SkyAgentvLLMReplica
 
         self._initialize_llm_servers()
         # self._init_agent_loop_workers()
@@ -80,7 +50,7 @@ class SkyAgentLoopManager(AgentLoopManager):
         self.tokenizer = hf_tokenizer(local_path, trust_remote_code=True)
 
         # init generator
-        self.server_manager = AsyncLLMServerManager(config, self.async_llm_servers)
+        self.server_manager = AsyncLLMServerManager(config, self.server_handles)
         self.skyagent_generator = AutoAgentRunner.from_task(
             task_yaml=config.skyrl_agent.task_yaml, infer_engine=self.server_manager, tokenizer=self.tokenizer
         )
@@ -90,52 +60,43 @@ class SkyAgentLoopManager(AgentLoopManager):
 
     # initialize here with the custom `async_server_class` implementation
     def _initialize_llm_servers(self):
-        self.rollout_tp_size = self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
-        self.rollout_dp_size = self.worker_group.world_size // self.rollout_tp_size
+        rollout_world_size = (
+            self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
+            * self.config.actor_rollout_ref.rollout.data_parallel_size
+            * self.config.actor_rollout_ref.rollout.pipeline_model_parallel_size
+        )
+        world_size = (
+            self.worker_group.world_size
+            if self.worker_group
+            else self.config.trainer.n_gpus_per_node * self.config.trainer.nnodes
+        )
+        num_replicas = world_size // rollout_world_size
 
-        register_center = ray.get_actor(f"{self.worker_group.name_prefix}_register_center")
-        workers_info = ray.get(register_center.get_worker_info.remote())
-        assert len(workers_info) == self.worker_group.world_size
-
-        self.async_llm_servers = [None] * self.rollout_dp_size
-        self.server_addresses = [None] * self.rollout_dp_size
-
-        if self.config.actor_rollout_ref.rollout.agent.custom_async_server:
-            server_class = async_server_class(
-                rollout_backend=self.config.actor_rollout_ref.rollout.name,
-                rollout_backend_module=self.config.actor_rollout_ref.rollout.agent.custom_async_server.path,
-                rollout_backend_class=self.config.actor_rollout_ref.rollout.agent.custom_async_server.name,
+        rollout_config = self.config.actor_rollout_ref.rollout
+        model_config = self.config.actor_rollout_ref.model
+        self.rollout_replicas = [
+            self.rollout_replica_class(
+                replica_rank=replica_rank,
+                config=rollout_config,
+                model_config=model_config,
+                gpus_per_node=self.config.trainer.n_gpus_per_node,
             )
+            for replica_rank in range(num_replicas)
+        ]
+        if self.worker_group:
+            self._run_all([server.init_hybrid(self.worker_group) for server in self.rollout_replicas])
         else:
-            server_class = async_server_class(rollout_backend=self.config.actor_rollout_ref.rollout.name)
+            self._run_all([server.init_standalone() for server in self.rollout_replicas])
+        self.server_handles = [server._server_handle for server in self.rollout_replicas]
+        self.server_addresses = [server._server_address for server in self.rollout_replicas]
 
-        # Start all server instances, restart if address already in use.
-        unready_dp_ranks = set(range(self.rollout_dp_size))
-        while len(unready_dp_ranks) > 0:
-            servers = {
-                rollout_dp_rank: server_class.options(
-                    # make sure AsyncvLLMServer colocates with its corresponding workers
-                    scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
-                        node_id=workers_info[rollout_dp_rank * self.rollout_tp_size],
-                        soft=False,
-                    ),
-                    name=f"async_llm_server_{rollout_dp_rank}",
-                ).remote(self.config, self.rollout_dp_size, rollout_dp_rank, self.worker_group.name_prefix)
-                for rollout_dp_rank in unready_dp_ranks
-            }
+        print(f"AgentLoopManager: {self.server_addresses}")
 
-            for rollout_dp_rank, server in servers.items():
-                try:
-                    address = ray.get(server.get_server_address.remote())
-                    self.server_addresses[rollout_dp_rank] = address
-                    self.async_llm_servers[rollout_dp_rank] = server
-                    unready_dp_ranks.remove(rollout_dp_rank)
-                except Exception:
-                    ray.kill(server)
-                    print(f"rollout server {rollout_dp_rank} failed, maybe address already in use, restarting...")
-
-        # All server instances are ready, init AsyncLLM engine.
-        ray.get([server.init_engine.remote() for server in self.async_llm_servers])
+        # Update Prometheus configuration with server addresses
+        if rollout_config.prometheus.enable:
+            if rollout_config.disable_log_stats:
+                raise ValueError("PROMETHEUS needs disable_log_stats==False, but it is currently True.")
+            update_prometheus_config(rollout_config.prometheus, self.server_addresses)
 
     def _postprocess(self, inputs: Dict[str, list[Any]]) -> DataProto:
         # NOTE: consistent with batch version of generate_sequences in vllm_rollout_spmd.py
@@ -227,9 +188,9 @@ class SkyAgentLoopManager(AgentLoopManager):
         return output
 
     def wake_up(self):
-        """Wake up all rollout server instances."""
-        ray.get([server.wake_up.remote() for server in self.async_llm_servers])
+        """Wake up all rollout replica instances."""
+        self._run_all([replica.wake_up() for replica in self.rollout_replicas])
 
     def sleep(self):
-        """Sleep all rollout server instances."""
-        ray.get([server.sleep.remote() for server in self.async_llm_servers])
+        """Sleep all rollout replica instances."""
+        self._run_all([replica.sleep() for replica in self.rollout_replicas])

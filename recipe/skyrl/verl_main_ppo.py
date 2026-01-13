@@ -32,7 +32,7 @@ from collections import defaultdict
 
 from verl.workers.reward_manager import register
 from verl.protocol import DataProto
-from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler, config_dir
+from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
 
 
 @register("skyagent")
@@ -103,7 +103,7 @@ class SkyAgentRewardManager:
             return reward_tensor
 
 
-@hydra.main(config_path=config_dir, config_name="ppo_trainer", version_base=None)
+@hydra.main(config_path="config", config_name="skyrl_trainer", version_base=None)
 def main(config):
     """Main entry point for PPO training with Hydra configuration management.
 
@@ -138,7 +138,7 @@ def run_ppo(config) -> None:
 
         ray.init(
             runtime_env=PPO_RAY_RUNTIME_ENV,
-            num_cpus=config.ray_init.num_cpus,
+            num_cpus=32,
         )
 
     # Create a remote instance of the TaskRunner class, and
@@ -232,14 +232,6 @@ class TaskRunner:
         # Used for multimodal LLM, could be None
         processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 
-        # Version validation for vllm.
-        if config.actor_rollout_ref.rollout.name in ["vllm"]:
-            from verl.utils.vllm_utils import is_version_ge
-
-            if config.actor_rollout_ref.model.get("lora_rank", 0) > 0:
-                if not is_version_ge(pkg="vllm", minver="0.7.3"):
-                    raise NotImplementedError("PPO LoRA is not supported before vllm 0.7.3")
-
         # Define worker classes based on the actor strategy.
         if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
             assert config.critic.strategy in {"fsdp", "fsdp2"}
@@ -268,7 +260,8 @@ class TaskRunner:
         else:
             raise NotImplementedError
 
-        from .verl_trainer import ResourcePoolManager, Role
+        from verl.trainer.ppo.ray_trainer import ResourcePoolManager
+        from verl.trainer.ppo.utils import Role
 
         # Map roles to their corresponding remote worker classes.
         role_worker_mapping = {

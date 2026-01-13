@@ -22,8 +22,8 @@ data:
 generator:
   infer_backend: verl
   backend_config: null
-  num_trajectories: 8
-  max_iterations: 50 # 50
+  num_trajectories: 2
+  max_iterations: 2 # 50
   max_prompt_length: 32768
   sampling_params:
     temperature: 1
@@ -44,8 +44,8 @@ generator:
 
 dispatcher:
   type: async_pipeline
-  max_parallel_agents: 96
-  max_eval_parallel_agents:  96
+  max_parallel_agents: 8
+  max_eval_parallel_agents: 8
   val_config:
-    max_parallel_agents: 32
-    max_eval_parallel_agents: 32
+    max_parallel_agents: 8
+    max_eval_parallel_agents: 8

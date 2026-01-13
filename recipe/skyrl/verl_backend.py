@@ -1,5 +1,6 @@
-from skyrl_agent.integrations.base import AsyncInferBackend, GeneratorOutput, GeneratorInput
+from .base import AsyncInferBackend, GeneratorOutput, GeneratorInput
 from typing import Any, List, Dict
+from uuid import uuid4
 from loguru import logger
 
 
@@ -14,8 +15,9 @@ class VeRLBackend(AsyncInferBackend):
         request_id: str,
         **kwargs,
     ):
+        unique_request_id = f"{request_id}_{uuid4().hex}"
         response_str, meta_info = await self.infer_engine.generate(
-            request_id=request_id,
+            request_id=unique_request_id,
             prompt_ids=input_ids,
             sampling_params=sampling_params,
         )

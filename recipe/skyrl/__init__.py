@@ -1,5 +1,5 @@
 from .verl_backend import VeRLGeneratorInput, VeRLBackend, VeRLGeneratorOutput
-from ..base import register_backend, BackendSpec
+from .base import register_backend, BackendSpec
 
 register_backend(
     "verl",

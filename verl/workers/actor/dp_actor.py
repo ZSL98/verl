@@ -77,11 +77,13 @@ class DataParallelPPOActor(BasePPOActor):
         else:
             entropy_from_logits = verl_F.entropy_from_logits
 
-        self.compute_entropy_from_logits = (
-            torch.compile(entropy_from_logits, dynamic=True)
-            if self.config.get("use_torch_compile", True)  # use torch compile by default
-            else entropy_from_logits
-        )
+        #FIXME: temporally change it to next line because npu does not support triton
+        self.compute_entropy_from_logits = entropy_from_logits
+        # self.compute_entropy_from_logits = (
+        #     torch.compile(entropy_from_logits, dynamic=True)
+        #     if self.config.get("use_torch_compile", True)  # use torch compile by default
+        #     else entropy_from_logits
+        # )
         self.device_name = get_device_name()
         self.param_dtype = PrecisionType.to_dtype(self.config.fsdp_config.get("dtype", "bfloat16"))
         if self.param_dtype == torch.float16:
